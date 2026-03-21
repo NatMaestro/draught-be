@@ -10,6 +10,13 @@ Cell values:
 
 Board layout (matches spec): first tile (0,0) has a piece. Pieces sit on (row+col)%2==0.
 Rows 0-3 = player2, rows 6-9 = player1. Player1 moves up (row decreases), player2 down (row increases).
+
+Uncrowned men slide forward only, but may capture (and continue multi-jumps) along any diagonal,
+including backward, when an opponent presents itself — same as typical international-style rules.
+
+Kings ("flying kings"): may slide any distance along diagonals through empty squares. They capture
+by jumping over an opponent on a diagonal and landing on any empty square beyond (forward, backward,
+or combined in a multi-jump sequence).
 """
 
 from typing import Optional
@@ -83,6 +90,132 @@ def _get_same_player(cell: int) -> set[int]:
     return {P2_PIECE, P2_KING}
 
 
+def _is_king_cell(cell: int) -> bool:
+    return cell in (P1_KING, P2_KING)
+
+
+def enumerate_king_flying_hops(board: list[list[int]], fr: tuple[int, int]) -> list[tuple]:
+    """
+    One-hop flying-king captures: along each diagonal, jump the closest opponent and land on any
+    empty playable square beyond it on the same ray.
+    Returns [((dest_row, dest_col), [captured_squares]), ...].
+    """
+    r, c = fr
+    cell = board[r][c]
+    if not _is_king_cell(cell):
+        return []
+    opponent = _get_opponent(cell)
+    captures: list[tuple[tuple[int, int], list]] = []
+    for dr, dc in BOTH:
+        k = 1
+        while True:
+            nr, nc = r + dr * k, c + dc * k
+            if not _in_bounds(nr, nc):
+                break
+            here = board[nr][nc]
+            if here in opponent:
+                lr, lc = nr + dr, nc + dc
+                while (
+                    _in_bounds(lr, lc)
+                    and board[lr][lc] == EMPTY
+                    and _is_playable_tile(lr, lc)
+                ):
+                    captures.append(((lr, lc), [(nr, nc)]))
+                    lr, lc = lr + dr, lc + dc
+                break
+            if here != EMPTY:
+                break
+            k += 1
+    return captures
+
+
+def enumerate_men_adjacent_hops(board: list[list[int]], fr: tuple[int, int]) -> list[tuple]:
+    """Adjacent jump captures for uncrowned men (any diagonal)."""
+    r, c = fr
+    cell = board[r][c]
+    if cell not in (P1_PIECE, P2_PIECE):
+        return []
+    opponent = _get_opponent(cell)
+    captures: list[tuple[tuple[int, int], list]] = []
+    for dr, dc in BOTH:
+        nr, nc = r + dr, c + dc
+        if not _in_bounds(nr, nc):
+            continue
+        ncell = board[nr][nc]
+        if ncell in opponent:
+            jr, jc = nr + dr, nc + dc
+            if _in_bounds(jr, jc) and board[jr][jc] == EMPTY and _is_playable_tile(jr, jc):
+                captures.append(((jr, jc), [(nr, nc)]))
+    return captures
+
+
+def get_next_capture_hops(board: list[list[int]], pos: tuple[int, int]) -> list[tuple]:
+    """Legal single capture hops from pos (king: flying; men: adjacent)."""
+    r, c = pos
+    cell = board[r][c]
+    if cell == EMPTY:
+        return []
+    if _is_king_cell(cell):
+        return enumerate_king_flying_hops(board, pos)
+    return enumerate_men_adjacent_hops(board, pos)
+
+
+def enumerate_king_quiet_slides(board: list[list[int]], fr: tuple[int, int]) -> list[tuple]:
+    """All empty diagonal slides (any distance) for a king — completing such a move removes the king."""
+    r, c = fr
+    cell = board[r][c]
+    if not _is_king_cell(cell):
+        return []
+    moves: list[tuple[tuple[int, int], list]] = []
+    for dr, dc in BOTH:
+        k = 1
+        while True:
+            nr, nc = r + dr * k, c + dc * k
+            if not _in_bounds(nr, nc):
+                break
+            if board[nr][nc] != EMPTY or not _is_playable_tile(nr, nc):
+                break
+            moves.append(((nr, nc), []))
+            k += 1
+    return moves
+
+
+def _extend_generic_captures(
+    board: list[list[int]], start: tuple[int, int], partial: list[tuple]
+) -> list[tuple[tuple[int, int], list]]:
+    """
+    Extend capture sequences (men: adjacent jumps; kings: flying hops).
+    Only terminal squares (no further mandatory capture from landing) are legal destinations.
+    """
+    result: list[tuple[tuple[int, int], list]] = []
+    for (dest, captured) in partial:
+        b2 = _apply_capture(board, start, dest, captured)
+        next_hops = get_next_capture_hops(b2, dest)
+        if not next_hops:
+            result.append((dest, captured))
+            continue
+        for nh_dest, nh_cap in next_hops:
+            new_cap = captured + nh_cap
+            extended = _extend_generic_captures(b2, dest, [(nh_dest, new_cap)])
+            result.extend(extended)
+    return result
+
+
+def _get_king_legal_moves(
+    board: list[list[int]], fr: tuple[int, int], must_capture: bool
+) -> list[tuple]:
+    row, col = fr
+    cell = board[row][col]
+    if not _is_king_cell(cell):
+        return []
+    captures = enumerate_king_flying_hops(board, fr)
+    if captures:
+        return _extend_generic_captures(board, fr, captures)
+    if must_capture:
+        return []
+    return enumerate_king_quiet_slides(board, fr)
+
+
 def count_pieces(board: list[list[int]], player: int) -> int:
     """Count pieces for player (1 or 2)."""
     p1 = {1, 3} if player == 1 else {2, 4}
@@ -99,16 +232,20 @@ def get_legal_moves(board: list[list[int]], fr: tuple[int, int], must_capture: b
     Return list of legal destinations from (row, col).
     Returns simple moves and/or captures. If must_capture, only captures.
     Each dest is ((row, col), captured_positions_list).
+
+    Men: slide forward only; capture with adjacent jumps (any diagonal).
+    Kings: flying slides and flying captures; non-capturing king moves remove the king.
     """
     row, col = fr
     cell = board[row][col]
     if cell == EMPTY:
         return []
-    directions = _get_directions(cell)
-    opponent = _get_opponent(cell)
-    captures: list[tuple[tuple[int, int], list]] = []
+    if _is_king_cell(cell):
+        return _get_king_legal_moves(board, fr, must_capture)
+    slide_dirs = _get_directions(cell)
+    captures = enumerate_men_adjacent_hops(board, fr)
     moves: list[tuple[tuple[int, int], list]] = []
-    for dr, dc in directions:
+    for dr, dc in slide_dirs:
         nr, nc = row + dr, col + dc
         if not _in_bounds(nr, nc):
             continue
@@ -116,68 +253,11 @@ def get_legal_moves(board: list[list[int]], fr: tuple[int, int], must_capture: b
         if ncell == EMPTY and _is_playable_tile(nr, nc):
             if not must_capture:
                 moves.append(((nr, nc), []))
-        elif ncell in opponent:
-            jr, jc = nr + dr, nc + dc
-            if _in_bounds(jr, jc) and board[jr][jc] == EMPTY and _is_playable_tile(jr, jc):
-                captures.append(((jr, jc), [(nr, nc)]))
     if captures:
-        extended = _extend_captures(board, fr, captures)
-        return extended
+        return _extend_generic_captures(board, fr, captures)
     if must_capture:
         return []
     return moves
-
-
-def _extend_captures(
-    board: list[list[int]], start: tuple[int, int], partial: list[tuple]
-) -> list[tuple[tuple[int, int], list]]:
-    """
-    Extend capture sequences with multi-jumps.
-    Only *terminal* squares (no further mandatory capture from landing) are legal destinations.
-    """
-    result: list[tuple[tuple[int, int], list]] = []
-    for (dest, captured) in partial:
-        if not _has_further_capture(board, start, dest, captured):
-            result.append((dest, captured))
-            continue
-        b2 = _apply_capture(board, start, dest, captured)
-        pr, pc = dest
-        cell = b2[pr][pc]
-        opponent = _get_opponent(cell)
-        for dr, dc in _get_directions(cell):
-            nr, nc = pr + dr, pc + dc
-            if not _in_bounds(nr, nc):
-                continue
-            jr, jc = nr + dr, nc + dc
-            if not _in_bounds(jr, jc):
-                continue
-            if (
-                b2[nr][nc] in opponent
-                and b2[jr][jc] == EMPTY
-                and _is_playable_tile(jr, jc)
-            ):
-                new_cap = captured + [(nr, nc)]
-                extended = _extend_captures(b2, dest, [((jr, jc), new_cap)])
-                result.extend(extended)
-    return result
-
-
-def _has_further_capture(
-    board: list[list[int]], start: tuple[int, int], dest: tuple[int, int], captured: list
-) -> bool:
-    b2 = _apply_capture(board, start, dest, captured)
-    cell = b2[dest[0]][dest[1]]
-    opponent = _get_opponent(cell)
-    for dr, dc in _get_directions(cell):
-        nr, nc = dest[0] + dr, dest[1] + dc
-        if not _in_bounds(nr, nc):
-            continue
-        jr, jc = nr + dr, nc + dc
-        if not _in_bounds(jr, jc):
-            continue
-        if b2[nr][nc] in opponent and b2[jr][jc] == EMPTY and _is_playable_tile(jr, jc):
-            return True
-    return False
 
 
 def _apply_capture(

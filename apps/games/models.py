@@ -50,11 +50,8 @@ class Game(models.Model):
     is_ai_game = models.BooleanField(default=False)
     # Same-device hot-seat (no second account). Used for undo eligibility.
     is_local_2p = models.BooleanField(default=False)
-    ai_difficulty = models.CharField(
-        max_length=10,
-        blank=True,
-        choices=[("easy", "Easy"), ("medium", "Medium"), ("hard", "Hard")],
-    )
+    # Engine mode id from client (e.g. easy, medium, expert, master, top_players).
+    ai_difficulty = models.CharField(max_length=32, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 

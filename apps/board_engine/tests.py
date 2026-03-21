@@ -7,6 +7,7 @@ from apps.board_engine.engine import (
     get_game_status,
     any_captures_available,
     P1_PIECE,
+    P1_KING,
     P2_PIECE,
     EMPTY,
     BOARD_SIZE,
@@ -33,6 +34,19 @@ class BoardEngineTests(TestCase):
         board[4][2] = EMPTY
         moves = get_legal_moves(board, (5, 1))
         self.assertGreater(len(moves), 0)
+
+    def test_backward_capture_for_man(self):
+        """Uncrowned men may capture diagonally backward when an opponent is jumped."""
+        board = [[EMPTY for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        # P1 man at (5,1); P2 at (6,2); landing (7,3) empty — jump is "backward" (row increases).
+        board[5][1] = P1_PIECE
+        board[6][2] = P2_PIECE
+        board[7][3] = EMPTY
+        moves = get_legal_moves(board, (5, 1))
+        dests = {dest for dest, cap in moves if cap}
+        self.assertIn((7, 3), dests)
+        ok = validate_and_get_move(board, 1, (5, 1), (7, 3))
+        self.assertIsNotNone(ok)
 
     def test_validate_move(self):
         board = create_initial_board()
@@ -80,3 +94,31 @@ class BoardEngineTests(TestCase):
         self.assertIsNone(bad)
         good = validate_and_get_move(board, 2, (3, 3), (7, 7))
         self.assertIsNotNone(good)
+
+    def test_flying_king_capture_lands_beyond_opponent(self):
+        board = [[EMPTY for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        board[5][5] = P1_KING
+        board[3][3] = P2_PIECE
+        board[1][1] = EMPTY
+        moves = get_legal_moves(board, (5, 5))
+        dests = {dest for dest, cap in moves if cap}
+        self.assertIn((1, 1), dests)
+        ok = validate_and_get_move(board, 1, (5, 5), (1, 1))
+        self.assertIsNotNone(ok)
+        new_b, caps = ok
+        self.assertEqual(caps, [(3, 3)])
+        self.assertEqual(new_b[1][1], P1_KING)
+        self.assertEqual(new_b[3][3], EMPTY)
+
+    def test_king_quiet_slide_moves_king_to_destination(self):
+        """Non-capturing king slide along an empty diagonal lands the king on the destination."""
+        board = [[EMPTY for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        board[5][5] = P1_KING
+        board[3][3] = EMPTY
+        board[1][1] = EMPTY
+        ok = validate_and_get_move(board, 1, (5, 5), (1, 1))
+        self.assertIsNotNone(ok)
+        new_b, caps = ok
+        self.assertEqual(caps, [])
+        self.assertEqual(new_b[5][5], EMPTY)
+        self.assertEqual(new_b[1][1], P1_KING)

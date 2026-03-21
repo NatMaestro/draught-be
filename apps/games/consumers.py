@@ -205,11 +205,13 @@ class GameConsumer(AsyncWebsocketConsumer):
             player_num, err = _resolve_player_num(user, game)
             if err:
                 return {"ok": False, "error": err}
-            ok, new_board, captured, winner = apply_move_service(game, player_num, fr, to)
+            ok, new_board, captured, winner, captured_values = apply_move_service(
+                game, player_num, fr, to
+            )
             game.refresh_from_db()
             if not ok:
                 return {"ok": False}
-            payload = self._move_payload(game, new_board, captured, winner)
+            payload = self._move_payload(game, new_board, captured, winner, captured_values)
             needs_ai = bool(
                 game.is_ai_game
                 and not winner
@@ -236,14 +238,16 @@ class GameConsumer(AsyncWebsocketConsumer):
             if not move:
                 return None
             fr, to, _cap = move
-            ok, new_board, captured, winner = apply_move_service(game, 2, fr, to)
+            ok, new_board, captured, winner, captured_values = apply_move_service(
+                game, 2, fr, to
+            )
             game.refresh_from_db()
             if not ok:
                 return None
-            payload = self._move_payload(game, new_board, captured, winner)
+            payload = self._move_payload(game, new_board, captured, winner, captured_values)
             return {"payload": payload}
 
-    def _move_payload(self, game, new_board, captured, winner):
+    def _move_payload(self, game, new_board, captured, winner, captured_piece_values):
         return {
             "type": "move_update",
             "board": new_board,
@@ -251,6 +255,7 @@ class GameConsumer(AsyncWebsocketConsumer):
             "winner": winner,
             "status": game.status,
             "captured": [{"row": r, "col": c} for (r, c) in captured],
+            "captured_piece_values": captured_piece_values,
         }
 
     @database_sync_to_async

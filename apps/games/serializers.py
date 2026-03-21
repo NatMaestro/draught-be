@@ -5,6 +5,7 @@ from .services import can_undo_game
 
 class GameSerializer(serializers.ModelSerializer):
     can_undo = serializers.SerializerMethodField()
+    moves = serializers.SerializerMethodField()
 
     class Meta:
         model = Game
@@ -23,11 +24,24 @@ class GameSerializer(serializers.ModelSerializer):
             "created_at",
             "finished_at",
             "can_undo",
+            "moves",
         ]
         read_only_fields = fields
 
     def get_can_undo(self, obj: Game) -> bool:
         return can_undo_game(obj)
+
+    def get_moves(self, obj: Game) -> list[dict]:
+        """Ordered plies for UI move list / refresh (P1 and P2 alternate from move 0)."""
+        return [
+            {
+                "from_row": m.from_row,
+                "from_col": m.from_col,
+                "to_row": m.to_row,
+                "to_col": m.to_col,
+            }
+            for m in obj.moves.order_by("created_at")
+        ]
 
 
 class GameListSerializer(serializers.ModelSerializer):

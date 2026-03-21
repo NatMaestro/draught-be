@@ -138,17 +138,20 @@ def create_game(
 
 def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: tuple[int, int]):
     """
-    Apply move if valid. Returns (success, new_board_state, captured_list, winner).
+    Apply move if valid. Returns
+    (success, new_board_state, captured_list, winner, captured_piece_values).
     """
     if game.status != Game.Status.ACTIVE:
-        return (False, None, [], None)
+        return (False, None, [], None, [])
     if game.current_turn != player_num:
-        return (False, None, [], None)
+        return (False, None, [], None, [])
     board = game.board_state
     result = validate_and_get_move(board, player_num, from_pos, to_pos)
     if result is None:
-        return (False, None, [], None)
+        return (False, None, [], None, [])
     new_board, captured = result
+    # Cell values on the pre-move board (for client trophies without relying on snapshots).
+    captured_piece_values = [board[r][c] for (r, c) in captured]
     winner = get_game_status(new_board, 2 if player_num == 1 else 1)
     with transaction.atomic():
         game.board_state = new_board
@@ -172,7 +175,7 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
             captured_row=cr,
             captured_col=cc,
         )
-    return (True, new_board, captured, winner)
+    return (True, new_board, captured, winner, captured_piece_values)
 
 
 def get_moves_for_piece(game: Game, row: int, col: int) -> list[dict]:

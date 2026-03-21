@@ -28,7 +28,7 @@ from apps.ratings.services import update_ratings
 class GameDetailView(generics.RetrieveAPIView):
     """GET /api/games/<id>/ - game state. Allowed for guest games or own games."""
 
-    queryset = Game.objects.all()
+    queryset = Game.objects.prefetch_related("moves")
     serializer_class = GameSerializer
     permission_classes = [AllowAny]
     lookup_field = "id"
@@ -85,7 +85,9 @@ class MoveView(APIView):
             player_num = game.current_turn
         else:
             player_num = 1 if request.user == game.player_one else 2
-        ok, new_board, captured, winner = apply_move(game, player_num, from_pos, to_pos)
+        ok, new_board, captured, winner, captured_values = apply_move(
+            game, player_num, from_pos, to_pos
+        )
         if not ok:
             return Response({"detail": "Invalid move"}, status=400)
         return Response({
@@ -94,6 +96,7 @@ class MoveView(APIView):
             "winner": winner,
             "status": game.status,
             "captured": [{"row": r, "col": c} for (r, c) in captured],
+            "captured_piece_values": captured_values,
         })
 
 
@@ -144,7 +147,7 @@ class AiMoveView(APIView):
         if not move:
             return Response({"detail": "No moves"}, status=status.HTTP_400_BAD_REQUEST)
         fr, to, _cap = move
-        ok, new_board, captured, winner = apply_move(game, 2, fr, to)
+        ok, new_board, captured, winner, captured_values = apply_move(game, 2, fr, to)
         if not ok:
             return Response({"detail": "Invalid AI move"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(
@@ -154,6 +157,7 @@ class AiMoveView(APIView):
                 "winner": winner,
                 "status": game.status,
                 "captured": [{"row": r, "col": c} for (r, c) in captured],
+                "captured_piece_values": captured_values,
             }
         )
 
