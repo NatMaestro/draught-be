@@ -3,7 +3,13 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .serializers import RegisterSerializer
+from .serializers import EmailOrUsernameTokenObtainPairSerializer, RegisterSerializer
+
+
+class EmailOrUsernameTokenObtainPairView(TokenObtainPairView):
+    """POST /api/auth/login — JWT; `username` may be username or email."""
+
+    serializer_class = EmailOrUsernameTokenObtainPairSerializer
 
 
 class RegisterView(generics.CreateAPIView):

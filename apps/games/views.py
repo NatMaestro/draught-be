@@ -10,16 +10,26 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import NotFound, PermissionDenied
-from django.db.models import Q
+from django.contrib.auth import get_user_model
+from django.db.models import Count, Q
 
-from .models import Game, Move
-from .serializers import GameSerializer, GameListSerializer, MoveSerializer
+User = get_user_model()
+
+from .models import Game, GameChallenge, Move
+from .serializers import (
+    GameChallengeCreateSerializer,
+    GameChallengeSerializer,
+    GameSerializer,
+    GameListSerializer,
+    MoveSerializer,
+)
 from apps.ai.services import get_ai_move
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .services import create_game, apply_move, get_moves_for_piece, undo_last_move
+from .clock_utils import clock_payload, freeze_clock_on_game_over
+from .services import create_game, apply_move, get_moves_for_piece, undo_last_move, resolve_clock_timeout_if_needed
 from .ws_payload import build_game_state_message
 from .permissions import can_access_game, is_guest_game
 from apps.ratings.services import update_ratings
@@ -55,6 +65,22 @@ class GameCreateView(APIView):
         if user is None:
             # Guest: only vs AI or local 2P; no ranked
             is_ranked = False
+        raw_tc = request.data.get("time_control_sec")
+        raw_min = request.data.get("minutes")
+        raw_use_clock = request.data.get("use_clock", True)
+        use_clock = True
+        if isinstance(raw_use_clock, bool):
+            use_clock = raw_use_clock
+        elif isinstance(raw_use_clock, str):
+            use_clock = raw_use_clock.strip().lower() not in ("0", "false", "no", "")
+        time_control_sec = 600
+        try:
+            if raw_tc is not None:
+                time_control_sec = int(raw_tc)
+            elif raw_min is not None:
+                time_control_sec = int(raw_min) * 60
+        except (TypeError, ValueError):
+            time_control_sec = 600
         game = create_game(
             player_one=user,
             player_two=None,
@@ -62,6 +88,8 @@ class GameCreateView(APIView):
             is_ai=is_ai,
             ai_difficulty=ai_difficulty if is_ai else "",
             is_local_2p=is_local_2p,
+            time_control_sec=time_control_sec,
+            use_clock=use_clock,
         )
         return Response(GameSerializer(game).data, status=status.HTTP_201_CREATED)
 
@@ -89,7 +117,25 @@ class MoveView(APIView):
             game, player_num, from_pos, to_pos
         )
         if not ok:
+            if winner is not None:
+                game.refresh_from_db()
+                return Response(
+                    {
+                        "detail": "timeout",
+                        "end_reason": "timeout",
+                        "board": game.board_state,
+                        "current_turn": game.current_turn,
+                        "winner": winner,
+                        "status": game.status,
+                        "captured": [],
+                        "captured_piece_values": [],
+                        "move_count": game.moves.count(),
+                        **clock_payload(game),
+                    },
+                    status=status.HTTP_200_OK,
+                )
             return Response({"detail": "Invalid move"}, status=400)
+        game.refresh_from_db()
         return Response({
             "board": new_board,
             "current_turn": game.current_turn,
@@ -97,6 +143,8 @@ class MoveView(APIView):
             "status": game.status,
             "captured": [{"row": r, "col": c} for (r, c) in captured],
             "captured_piece_values": captured_values,
+            "move_count": game.moves.count(),
+            **clock_payload(game),
         })
 
 
@@ -119,6 +167,10 @@ class LegalMovesView(APIView):
             row, col = int(row), int(col)
         except (TypeError, ValueError):
             return Response({"detail": "row and col must be integers"}, status=400)
+        resolve_clock_timeout_if_needed(game)
+        game.refresh_from_db()
+        if game.status != Game.Status.ACTIVE:
+            return Response({"moves": []})
         moves = get_moves_for_piece(game, row, col)
         return Response({"moves": moves})
 
@@ -149,7 +201,25 @@ class AiMoveView(APIView):
         fr, to, _cap = move
         ok, new_board, captured, winner, captured_values = apply_move(game, 2, fr, to)
         if not ok:
+            if winner is not None:
+                game.refresh_from_db()
+                return Response(
+                    {
+                        "detail": "timeout",
+                        "end_reason": "timeout",
+                        "board": game.board_state,
+                        "current_turn": game.current_turn,
+                        "winner": winner,
+                        "status": game.status,
+                        "captured": [],
+                        "captured_piece_values": [],
+                        "move_count": game.moves.count(),
+                        **clock_payload(game),
+                    },
+                    status=status.HTTP_200_OK,
+                )
             return Response({"detail": "Invalid AI move"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        game.refresh_from_db()
         return Response(
             {
                 "board": new_board,
@@ -158,6 +228,8 @@ class AiMoveView(APIView):
                 "status": game.status,
                 "captured": [{"row": r, "col": c} for (r, c) in captured],
                 "captured_piece_values": captured_values,
+                "move_count": game.moves.count(),
+                **clock_payload(game),
             }
         )
 
@@ -167,7 +239,7 @@ def _broadcast_game_state_ws(game):
     channel_layer = get_channel_layer()
     if not channel_layer:
         return
-    msg = build_game_state_message(game)
+    msg = build_game_state_message(game, undo_applied=True)
     async_to_sync(channel_layer.group_send)(
         f"game_{game.id}",
         {"type": "broadcast", "message": msg},
@@ -208,6 +280,7 @@ class ResignView(APIView):
             return Response({"detail": "Game not active"}, status=400)
         game.status = Game.Status.FINISHED
         game.finished_at = timezone.now()
+        freeze_clock_on_game_over(game)
         if not is_guest_game(game):
             game.winner = game.player_two if request.user == game.player_one else game.player_one
             if game.is_ranked and game.winner:
@@ -224,7 +297,117 @@ class GameHistoryView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Game.objects.filter(
-            Q(player_one=self.request.user) | Q(player_two=self.request.user),
-            status=Game.Status.FINISHED,
-        ).order_by("-finished_at")[:50]
+        return (
+            Game.objects.filter(
+                Q(player_one=self.request.user) | Q(player_two=self.request.user),
+                status=Game.Status.FINISHED,
+            )
+            .select_related("player_one", "player_two")
+            .annotate(move_count=Count("moves"))
+            .order_by("-finished_at")[:50]
+        )
+
+
+class ChallengeIncomingListView(generics.ListAPIView):
+    """GET /api/games/challenges/incoming/ — pending invites for the current user."""
+
+    serializer_class = GameChallengeSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            GameChallenge.objects.filter(
+                to_user=self.request.user,
+                status=GameChallenge.Status.PENDING,
+            )
+            .select_related("from_user", "to_user")
+        )
+
+
+class ChallengeCreateView(APIView):
+    """POST /api/games/challenges/ — send a game request to another user."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = GameChallengeCreateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        to_id = ser.validated_data["to_user_id"]
+        rematch_gid = ser.validated_data.get("rematch_game_id")
+        if to_id == request.user.id:
+            return Response({"detail": "Cannot challenge yourself"}, status=400)
+        try:
+            to_user = User.objects.get(pk=to_id)
+        except User.DoesNotExist:
+            return Response({"detail": "User not found"}, status=404)
+        if GameChallenge.objects.filter(
+            from_user=request.user,
+            to_user=to_user,
+            status=GameChallenge.Status.PENDING,
+        ).exists():
+            return Response({"detail": "Challenge already pending"}, status=400)
+        rematch = None
+        if rematch_gid:
+            rematch = Game.objects.filter(id=rematch_gid).first()
+        ch = GameChallenge.objects.create(
+            from_user=request.user,
+            to_user=to_user,
+            rematch_game=rematch,
+        )
+        return Response(GameChallengeSerializer(ch).data, status=status.HTTP_201_CREATED)
+
+
+class ChallengeAcceptView(APIView):
+    """POST /api/games/challenges/<uuid>/accept/"""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, challenge_id):
+        ch = (
+            GameChallenge.objects.filter(
+                id=challenge_id,
+                to_user=request.user,
+                status=GameChallenge.Status.PENDING,
+            )
+            .select_related("from_user", "to_user", "rematch_game")
+            .first()
+        )
+        if not ch:
+            return Response({"detail": "Not found"}, status=404)
+        tc = 600
+        use_clock = True
+        if ch.rematch_game_id:
+            g = ch.rematch_game
+            tc = int(getattr(g, "time_control_sec", 600) or 600)
+            use_clock = bool(getattr(g, "use_clock", True))
+        game = create_game(
+            player_one=ch.from_user,
+            player_two=ch.to_user,
+            is_ranked=False,
+            time_control_sec=tc,
+            use_clock=use_clock,
+        )
+        ch.status = GameChallenge.Status.ACCEPTED
+        ch.save(update_fields=["status"])
+        return Response(
+            {"game_id": str(game.id), "game": GameSerializer(game).data},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ChallengeDeclineView(APIView):
+    """POST /api/games/challenges/<uuid>/decline/"""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, challenge_id):
+        ch = GameChallenge.objects.filter(
+            id=challenge_id,
+            to_user=request.user,
+            status=GameChallenge.Status.PENDING,
+        ).first()
+        if not ch:
+            return Response({"detail": "Not found"}, status=404)
+        ch.status = GameChallenge.Status.DECLINED
+        ch.save(update_fields=["status"])
+        return Response({"ok": True})

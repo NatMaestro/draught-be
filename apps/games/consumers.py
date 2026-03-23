@@ -13,6 +13,8 @@ from django.utils import timezone
 from apps.ai.services import get_ai_move
 
 from .permissions import is_guest_game
+from .clock_utils import clock_payload, freeze_clock_on_game_over
+from .services import resolve_clock_timeout_if_needed
 from .ws_payload import build_game_state_message
 
 
@@ -97,7 +99,14 @@ class GameConsumer(AsyncWebsocketConsumer):
                 text_data=json.dumps({"type": "error", "detail": "Access denied"}),
             )
             return
-        payload = build_game_state_message(game)
+        await database_sync_to_async(resolve_clock_timeout_if_needed)(game)
+        game = await self.get_game_orm()
+        if not game:
+            await self.send(
+                text_data=json.dumps({"type": "error", "detail": "Game not found"}),
+            )
+            return
+        payload = await database_sync_to_async(build_game_state_message)(game)
         payload["chat"] = await self.get_recent_chat_messages()
         await self.send(text_data=json.dumps(payload, default=str))
 
@@ -210,6 +219,11 @@ class GameConsumer(AsyncWebsocketConsumer):
             )
             game.refresh_from_db()
             if not ok:
+                if winner is not None:
+                    payload = self._move_payload(
+                        game, new_board, captured, winner, captured_values
+                    )
+                    return {"ok": True, "payload": payload, "needs_ai": False}
                 return {"ok": False}
             payload = self._move_payload(game, new_board, captured, winner, captured_values)
             needs_ai = bool(
@@ -248,15 +262,26 @@ class GameConsumer(AsyncWebsocketConsumer):
             return {"payload": payload}
 
     def _move_payload(self, game, new_board, captured, winner, captured_piece_values):
-        return {
+        from .models import Game
+
+        board_out = new_board if new_board is not None else game.board_state
+        end_reason = None
+        if new_board is None and winner is not None and game.status == Game.Status.FINISHED:
+            end_reason = "timeout"
+        msg = {
             "type": "move_update",
-            "board": new_board,
+            "board": board_out,
             "current_turn": game.current_turn,
             "winner": winner,
             "status": game.status,
             "captured": [{"row": r, "col": c} for (r, c) in captured],
             "captured_piece_values": captured_piece_values,
+            "move_count": game.moves.count(),
+            **clock_payload(game),
         }
+        if end_reason:
+            msg["end_reason"] = end_reason
+        return msg
 
     @database_sync_to_async
     def resign_game_sync(self, user):
@@ -272,6 +297,7 @@ class GameConsumer(AsyncWebsocketConsumer):
             return {"error": "Game not active"}
         game.status = Game.Status.FINISHED
         game.finished_at = timezone.now()
+        freeze_clock_on_game_over(game)
         winner_id = None
         winner_player: int | None = None
         if is_guest_game(game):

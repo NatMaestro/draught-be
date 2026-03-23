@@ -169,11 +169,25 @@ SPECTACULAR_SETTINGS = {
 
 from datetime import timedelta
 
+# JWT — access is short-lived; refresh is long-lived (client must store refresh & call /auth/token/refresh/).
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=1),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        minutes=env.int("JWT_ACCESS_MINUTES", default=60),
+    ),
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        days=env.int("JWT_REFRESH_DAYS", default=7),
+    ),
+    "ROTATE_REFRESH_TOKENS": False,
+    "BLACKLIST_AFTER_ROTATION": False,
 }
 
 # ELO / Rating
 ELO_K_FACTOR = env.int("ELO_K_FACTOR", default=32)
 ELO_INITIAL_RATING = env.int("ELO_INITIAL_RATING", default=1000)
+
+# Ranked matchmaking: pair within a rating gap that widens while you wait (Chess.com-style).
+# See apps.matchmaking.services.ranked_effective_delta_for_elapsed
+MATCHMAKING_RANKED_INITIAL_DELTA = env.int("MATCHMAKING_RANKED_INITIAL_DELTA", default=150)
+MATCHMAKING_RANKED_MAX_DELTA = env.int("MATCHMAKING_RANKED_MAX_DELTA", default=500)
+MATCHMAKING_RANKED_EXPAND_EVERY_SEC = env.int("MATCHMAKING_RANKED_EXPAND_EVERY_SEC", default=15)
+MATCHMAKING_RANKED_EXPAND_STEP = env.int("MATCHMAKING_RANKED_EXPAND_STEP", default=25)

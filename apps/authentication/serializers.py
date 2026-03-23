@@ -1,7 +1,27 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 User = get_user_model()
+
+
+class EmailOrUsernameTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Accept either Django username or email in the `username` field (SimpleJWT default).
+    Users often type their email at login; map email -> username before authenticate().
+    """
+
+    def validate(self, attrs):
+        username_field = User.USERNAME_FIELD
+        raw = attrs.get(username_field)
+        if raw and "@" in str(raw):
+            email = str(raw).strip()
+            try:
+                user_obj = User.objects.get(email__iexact=email)
+                attrs = {**attrs, username_field: getattr(user_obj, username_field)}
+            except User.DoesNotExist:
+                pass
+        return super().validate(attrs)
 
 
 class RegisterSerializer(serializers.ModelSerializer):

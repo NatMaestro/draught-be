@@ -15,6 +15,14 @@ from apps.board_engine.engine import (
 )
 from apps.ratings.services import update_ratings
 
+from .clock_utils import (
+    active_player_remaining_seconds,
+    apply_clock_before_move,
+    clock_payload,
+    freeze_clock_on_game_over,
+    init_clock_for_active_game,
+    stamp_turn_started_now,
+)
 from .models import Game, Move
 
 
@@ -60,6 +68,35 @@ def replay_game_state(game: Game):
     return replay_game_state_from_moves(game.moves.order_by("created_at"))
 
 
+def get_moves_payload_for_client(game: Game) -> list[dict]:
+    """
+    Ordered plies with `captured` squares each — for WebSocket/API clients and replay UI.
+    """
+    board = create_initial_board()
+    turn = 1
+    out: list[dict] = []
+    for m in game.moves.order_by("created_at"):
+        fr = (m.from_row, m.from_col)
+        to = (m.to_row, m.to_col)
+        result = validate_and_get_move(board, turn, fr, to)
+        if result is None:
+            break
+        new_board, captured = result
+        out.append(
+            {
+                "from_row": m.from_row,
+                "from_col": m.from_col,
+                "to_row": m.to_row,
+                "to_col": m.to_col,
+                "player": turn,
+                "captured": [{"row": r, "col": c} for (r, c) in captured],
+            }
+        )
+        board = new_board
+        turn = 2 if turn == 1 else 1
+    return out
+
+
 def undo_last_move(game: Game):
     """
     Delete the last move row and rebuild game.board_state from remaining moves.
@@ -88,6 +125,7 @@ def undo_last_move(game: Game):
         if winner:
             game.status = Game.Status.FINISHED
             game.finished_at = datetime.utcnow()
+            freeze_clock_on_game_over(game)
             if not game.is_ai_game and game.player_one and game.player_two:
                 game.winner = game.player_one if winner == 1 else game.player_two
                 if game.is_ranked:
@@ -96,6 +134,7 @@ def undo_last_move(game: Game):
             game.status = Game.Status.ACTIVE
             game.finished_at = None
             game.winner = None
+            stamp_turn_started_now(game)
         game.save()
 
     payload = {
@@ -106,8 +145,49 @@ def undo_last_move(game: Game):
         "p1_captured_piece_values": p1_caps,
         "p2_captured_piece_values": p2_caps,
         "can_undo": can_undo_game(game),
+        **clock_payload(game),
     }
     return True, None, payload
+
+
+def finish_game_on_timeout(game: Game, loser_seat: int) -> int:
+    """
+    Persist game over by flag: opponent of loser_seat wins.
+    Returns winner seat (1 or 2). Caller must hold a transaction if needed.
+    """
+    winner_seat = 2 if loser_seat == 1 else 1
+    game.status = Game.Status.FINISHED
+    game.finished_at = datetime.utcnow()
+    freeze_clock_on_game_over(game)
+    if not game.is_ai_game and game.player_one and game.player_two:
+        game.winner = game.player_one if winner_seat == 1 else game.player_two
+        if game.is_ranked:
+            update_ratings(game)
+    elif game.is_ai_game and game.player_one:
+        if winner_seat == 1:
+            game.winner = game.player_one
+    game.save()
+    return winner_seat
+
+
+def resolve_clock_timeout_if_needed(game: Game) -> int | None:
+    """
+    If the active player's time has run out, end the game (opponent wins).
+    Returns winner seat (1 or 2) if the game was ended, else None.
+    """
+    if game.status != Game.Status.ACTIVE:
+        return None
+    if not getattr(game, "use_clock", True):
+        return None
+    remaining = active_player_remaining_seconds(game)
+    if remaining is None or remaining > 0:
+        return None
+
+    loser_seat = game.current_turn
+    with transaction.atomic():
+        apply_clock_before_move(game, loser_seat)
+        finish_game_on_timeout(game, loser_seat)
+    return 2 if loser_seat == 1 else 1
 
 
 def create_game(
@@ -117,11 +197,17 @@ def create_game(
     is_ai=False,
     ai_difficulty="",
     is_local_2p=False,
+    time_control_sec: int = 600,
+    use_clock: bool = True,
 ):
     """Create new game with initial board."""
     board = create_initial_board()
     # ACTIVE: has opponent, vs AI, or same-device hot-seat (no second account).
     is_playable = bool(player_two or is_ai or is_local_2p)
+    if use_clock:
+        tc = max(60, min(7200, int(time_control_sec or 600)))
+    else:
+        tc = 0
     game = Game.objects.create(
         player_one=player_one,
         player_two=player_two,
@@ -132,7 +218,21 @@ def create_game(
         is_ai_game=is_ai,
         is_local_2p=is_local_2p,
         ai_difficulty=ai_difficulty or "",
+        use_clock=use_clock,
+        time_control_sec=tc,
+        p1_time_remaining_sec=float(tc) if use_clock else 0.0,
+        p2_time_remaining_sec=float(tc) if use_clock else 0.0,
+        turn_started_at=None,
     )
+    if is_playable:
+        init_clock_for_active_game(game)
+        game.save(
+            update_fields=[
+                "p1_time_remaining_sec",
+                "p2_time_remaining_sec",
+                "turn_started_at",
+            ],
+        )
     return game
 
 
@@ -140,11 +240,21 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
     """
     Apply move if valid. Returns
     (success, new_board_state, captured_list, winner, captured_piece_values).
+
+    On loss by timeout, success is False and winner is the winning seat (1 or 2);
+    new_board_state is None and captured empty.
     """
     if game.status != Game.Status.ACTIVE:
         return (False, None, [], None, [])
     if game.current_turn != player_num:
         return (False, None, [], None, [])
+
+    if getattr(game, "use_clock", True):
+        wt = resolve_clock_timeout_if_needed(game)
+        if wt is not None:
+            game.refresh_from_db()
+            return (False, game.board_state, [], wt, [])
+
     board = game.board_state
     result = validate_and_get_move(board, player_num, from_pos, to_pos)
     if result is None:
@@ -154,15 +264,27 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
     captured_piece_values = [board[r][c] for (r, c) in captured]
     winner = get_game_status(new_board, 2 if player_num == 1 else 1)
     with transaction.atomic():
+        if getattr(game, "use_clock", True):
+            apply_clock_before_move(game, player_num)
+            remaining = (
+                game.p1_time_remaining_sec if player_num == 1 else game.p2_time_remaining_sec
+            )
+            if remaining <= 0:
+                ws = finish_game_on_timeout(game, player_num)
+                return (False, None, [], ws, [])
+
         game.board_state = new_board
         game.current_turn = 2 if player_num == 1 else 1
         if winner:
             game.status = Game.Status.FINISHED
             game.finished_at = datetime.utcnow()
+            freeze_clock_on_game_over(game)
             if not game.is_ai_game and game.player_one and game.player_two:
                 game.winner = game.player_one if winner == 1 else game.player_two
                 if game.is_ranked:
                     update_ratings(game)
+        else:
+            stamp_turn_started_now(game)
         game.save()
         cr, cc = (captured[0] if captured else (None, None))
         Move.objects.create(

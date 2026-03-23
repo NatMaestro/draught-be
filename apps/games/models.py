@@ -54,6 +54,22 @@ class Game(models.Model):
     ai_difficulty = models.CharField(max_length=32, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # Fischer-style clock (server source of truth for online sync).
+    use_clock = models.BooleanField(
+        default=True,
+        help_text="When False, no time limits and no clock deductions.",
+    )
+    time_control_sec = models.PositiveIntegerField(
+        default=600,
+        help_text="Initial bank per player in seconds (e.g. 600 = 10 minutes).",
+    )
+    p1_time_remaining_sec = models.FloatField(default=600.0)
+    p2_time_remaining_sec = models.FloatField(default=600.0)
+    turn_started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the current turn began; active player's clock runs from here.",
+    )
 
     class Meta:
         db_table = "games_game"
@@ -61,6 +77,52 @@ class Game(models.Model):
 
     def __str__(self):
         return f"Game {self.id}"
+
+
+class GameChallenge(models.Model):
+    """User-to-user game invite (rematch / direct challenge)."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        DECLINED = "declined", "Declined"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    from_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="challenges_sent",
+    )
+    to_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="challenges_received",
+    )
+    rematch_game = models.ForeignKey(
+        "Game",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rematch_challenges",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "games_gamechallenge"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["to_user", "status"]),
+        ]
+
+    def __str__(self):
+        return f"Challenge {self.id}"
 
 
 class GameChatMessage(models.Model):
