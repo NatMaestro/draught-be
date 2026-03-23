@@ -45,7 +45,14 @@ Or ensure at least one superuser exists (prompts only if none exist):
 python manage.py ensure_admin
 ```
 
-Log in with that user. You should then see **Users** (from the Users app) and **Games** / **Moves** (from the Games app). If you’re logged in but the dashboard is empty, your user may not be staff — create a new superuser and log in with it.
+Log in with that user. You should see:
+
+| App | Models |
+|-----|--------|
+| **Users** | Users (rating, stats, staff flags) |
+| **Games** | Games, Moves, Game challenges, Game chat messages |
+
+If the dashboard is empty, your user may not be staff — create a new superuser and log in with it.
 
 ## Run
 
