@@ -111,6 +111,17 @@ Server sends:
 
 ## Config
 
-- `.env` — `SECRET_KEY`, `DEBUG`, `DATABASE_URL`, `REDIS_URL`, `USE_REDIS_CHANNELS`
-- For PostgreSQL: `DATABASE_URL=postgres://user:pass@host:5432/dbname`
+- `.env` — `SECRET_KEY`, `DEBUG`, **`DATABASE_URL`** (required: PostgreSQL / Neon), `REDIS_URL`, `USE_REDIS_CHANNELS`
+- `DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require` (Neon: copy from dashboard)
+- On startup you should see: **`[Draught] PostgreSQL connection established - host:port/dbname`**
 - For Redis channels: `USE_REDIS_CHANNELS=True` (default False uses InMemoryChannelLayer)
+- **`manage.py test`** uses an in-memory SQLite DB only for the test runner (no `DATABASE_URL` needed for tests).
+
+### Database connection timeout (e.g. Neon)
+
+If you see `connection timeout` to `*.neon.tech`, **password changes will not help** — TCP never completes before auth.
+
+1. **Network** — Try another Wi‑Fi, phone hotspot, VPN off/on, Windows Firewall allowing Python outbound.
+2. **Neon** — Branch awake; try **Direct** vs **Pooler** host in the Connect dialog; check **IP allowlist** if enabled.
+3. **`DATABASE_CONNECT_TIMEOUT`** in `.env` (default 120s in `settings.py`) if the DB is slow to wake.
+4. **Hosted deploy** (Render, etc.) often reaches Neon even when your laptop cannot — same credentials, different network path.

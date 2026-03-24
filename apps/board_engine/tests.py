@@ -122,3 +122,18 @@ class BoardEngineTests(TestCase):
         self.assertEqual(caps, [])
         self.assertEqual(new_b[5][5], EMPTY)
         self.assertEqual(new_b[1][1], P1_KING)
+
+    def test_multi_capture_mid_promotion_then_king_flying(self):
+        """
+        Man crowns on row 0 and continues as a flying king; final square is not row 0.
+        apply_move must replay hops — a single teleport would leave a man on the last square.
+        """
+        board = [[EMPTY for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        board[2][8] = P1_PIECE
+        board[1][7] = P2_PIECE
+        board[3][3] = P2_PIECE
+        ok = validate_and_get_move(board, 1, (2, 8), (4, 2))
+        self.assertIsNotNone(ok)
+        new_b, caps = ok
+        self.assertEqual(len(caps), 2)
+        self.assertEqual(new_b[4][2], P1_KING)

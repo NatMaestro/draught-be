@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 env = environ.Env(DEBUG=(bool, True))
@@ -94,7 +95,8 @@ if USE_REDIS_CHANNELS:
 else:
     CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 
-_db_url = env("DATABASE_URL", default="")
+_db_url = env("DATABASE_URL", default="").strip()
+
 if RUNNING_TESTS:
     DATABASES = {
         "default": {
@@ -104,14 +106,13 @@ if RUNNING_TESTS:
     }
 elif _db_url and _db_url.startswith("postgres"):
     DATABASES = {"default": env.db("DATABASE_URL")}
-    DATABASES["default"]["OPTIONS"] = {"connect_timeout": 10}
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-        }
+    DATABASES["default"]["OPTIONS"] = {
+        "connect_timeout": env.int("DATABASE_CONNECT_TIMEOUT", default=120),
     }
+else:
+    raise ImproperlyConfigured(
+        "Set DATABASE_URL in .env to a PostgreSQL connection string (e.g. Neon postgresql://...)."
+    )
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

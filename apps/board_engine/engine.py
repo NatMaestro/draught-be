@@ -292,24 +292,64 @@ def any_captures_available(board: list[list[int]], player: int) -> bool:
     return False
 
 
+def _normalize_sq(sq: object) -> tuple[int, int]:
+    if isinstance(sq, (tuple, list)) and len(sq) >= 2:
+        return (int(sq[0]), int(sq[1]))
+    raise TypeError("expected (row, col)")
+
+
+def _apply_capture_sequence(
+    board: list[list[int]],
+    pos: tuple[int, int],
+    final_to: tuple[int, int],
+    caps: list[tuple[int, int]],
+) -> list[list[int]]:
+    """
+    Replay a full capture chain hop-by-hop (men + flying kings). Required when a man
+    promotes mid-sequence and continues as a king — a single teleport from start to final
+    square would compute the wrong piece type.
+    """
+    if not caps:
+        if pos != final_to:
+            raise ValueError("capture chain does not end at declared destination")
+        return board
+    want = caps[0]
+    hops = get_next_capture_hops(board, pos)
+    for dest, cap_list in hops:
+        if not cap_list:
+            continue
+        first = _normalize_sq(cap_list[0])
+        if first != want:
+            continue
+        b2 = _apply_capture(board, pos, dest, cap_list)
+        try:
+            return _apply_capture_sequence(b2, dest, final_to, caps[1:])
+        except ValueError:
+            continue
+    raise ValueError("illegal or ambiguous capture chain")
+
+
 def apply_move(
     board: list[list[int]], fr: tuple[int, int], to: tuple[int, int], captured: list
 ) -> list[list[int]]:
     """Apply move and return new board state. Promotes to king if needed."""
     import copy
-    b = copy.deepcopy(board)
-    r0, c0 = fr
-    r1, c1 = to
-    cell = b[r0][c0]
-    b[r1][c1] = cell
-    b[r0][c0] = EMPTY
-    for (r, c) in captured:
-        b[r][c] = EMPTY
-    if cell == P1_PIECE and r1 == 0:
-        b[r1][c1] = P1_KING
-    elif cell == P2_PIECE and r1 == BOARD_SIZE - 1:
-        b[r1][c1] = P2_KING
-    return b
+    if not captured:
+        b = copy.deepcopy(board)
+        r0, c0 = fr
+        r1, c1 = to
+        cell = b[r0][c0]
+        b[r1][c1] = cell
+        b[r0][c0] = EMPTY
+        if cell == P1_PIECE and r1 == 0:
+            b[r1][c1] = P1_KING
+        elif cell == P2_PIECE and r1 == BOARD_SIZE - 1:
+            b[r1][c1] = P2_KING
+        return b
+
+    cap_sq = [_normalize_sq(x) for x in captured]
+    b0 = copy.deepcopy(board)
+    return _apply_capture_sequence(b0, fr, to, cap_sq)
 
 
 def validate_and_get_move(

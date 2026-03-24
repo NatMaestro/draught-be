@@ -1,8 +1,17 @@
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 User = get_user_model()
+
+
+def _user_by_email_or_username_as_email(username_field: str, email: str):
+    """Resolve login string that looks like an email to a User (or None)."""
+    u = User.objects.filter(email__iexact=email).first()
+    if u is not None:
+        return u
+    return User.objects.filter(**{f"{username_field}__iexact": email}).first()
 
 
 class EmailOrUsernameTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -13,15 +22,31 @@ class EmailOrUsernameTokenObtainPairSerializer(TokenObtainPairSerializer):
 
     def validate(self, attrs):
         username_field = User.USERNAME_FIELD
-        raw = attrs.get(username_field)
-        if raw and "@" in str(raw):
-            email = str(raw).strip()
-            try:
-                user_obj = User.objects.get(email__iexact=email)
-                attrs = {**attrs, username_field: getattr(user_obj, username_field)}
-            except User.DoesNotExist:
-                pass
-        return super().validate(attrs)
+        original_raw = attrs.get(username_field)
+        attrs = {**attrs}
+        if original_raw and "@" in str(original_raw):
+            email = str(original_raw).strip()
+            user_obj = _user_by_email_or_username_as_email(username_field, email)
+            if user_obj is not None:
+                attrs[username_field] = getattr(user_obj, username_field)
+        try:
+            return super().validate(attrs)
+        except AuthenticationFailed:
+            # Wrong password vs inactive both yield no user from authenticate(); clarify inactive.
+            pwd = attrs.get("password")
+            if original_raw and "@" in str(original_raw) and pwd:
+                email = str(original_raw).strip()
+                u = _user_by_email_or_username_as_email(username_field, email)
+                if (
+                    u is not None
+                    and u.check_password(pwd)
+                    and not u.is_active
+                ):
+                    raise AuthenticationFailed(
+                        "This account is inactive. Ask an admin to enable it "
+                        "(User.is_active = True)."
+                    ) from None
+            raise
 
 
 class RegisterSerializer(serializers.ModelSerializer):

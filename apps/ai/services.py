@@ -12,6 +12,7 @@ from apps.board_engine.engine import (
     any_captures_available,
     apply_move,
     get_game_status,
+    EMPTY,
     P1_PIECE,
     P2_PIECE,
     P1_KING,
@@ -62,17 +63,18 @@ def get_ai_move(board: list[list[int]], player: int, difficulty: str) -> Optiona
         return random.choice(all_moves)
     if mode == "adaptive":
         return _adaptive_move(all_moves)
+    # Depth tuned for responsive turns on a 10×10 board (deeper = slower API).
     if mode == "hard":
         d = 3 if _is_tricky(board, player, all_moves) else 2
         return _minimax_move(board, player, all_moves, depth=d)
     if mode == "expert":
-        d = 4 if _is_tricky(board, player, all_moves) else 3
+        d = 5 if _is_tricky(board, player, all_moves) else 4
         return _minimax_move(board, player, all_moves, depth=d)
     if mode == "master":
-        d = 5 if _is_tricky(board, player, all_moves) else 4
+        d = 6 if _is_tricky(board, player, all_moves) else 5
         return _minimax_move(board, player, all_moves, depth=d)
     if mode == "top_players":
-        d = 5 if _is_tricky(board, player, all_moves) else 4
+        d = 7 if _is_tricky(board, player, all_moves) else 6
         return _minimax_move(board, player, all_moves, depth=d)
     # Unknown label — default to medium-strong search
     d = 3 if _is_tricky(board, player, all_moves) else 2
@@ -107,6 +109,27 @@ def _adaptive_move(all_moves: list) -> tuple:
     return random.choice(all_moves)
 
 
+def _order_moves_for_search(
+    board: list[list[int]], moves: list[tuple]
+) -> list[tuple]:
+    """Prefer captures and high-value takes first — better alpha–beta pruning."""
+
+    def sort_key(m: tuple) -> tuple:
+        fr, to, cap = m
+        cap = cap or []
+        cap_val = 0
+        for p in cap:
+            pr, pc = int(p[0]), int(p[1])
+            cell = board[pr][pc]
+            if cell in (P1_KING, P2_KING):
+                cap_val += 4
+            elif cell in (P1_PIECE, P2_PIECE):
+                cap_val += 2
+        return (len(cap), cap_val)
+
+    return sorted(moves, key=sort_key, reverse=True)
+
+
 def _minimax_move(
     board: list[list[int]],
     player: int,
@@ -114,10 +137,11 @@ def _minimax_move(
     depth: int,
 ) -> tuple[tuple[int, int], tuple[int, int], list]:
     """Pick best move via minimax at root for `player` (alpha–beta inside search)."""
+    ordered = _order_moves_for_search(board, moves)
     best_score = float("-inf")
-    best_move = moves[0]
+    best_move = ordered[0]
     next_p = 2 if player == 1 else 1
-    for (fr, to, cap) in moves:
+    for (fr, to, cap) in ordered:
         new_board = apply_move(board, fr, to, cap)
         score = _minimax_ab(
             new_board, next_p, depth - 1, False, float("-inf"), float("inf")
@@ -139,9 +163,9 @@ def _minimax_ab(
     """Minimax with alpha–beta pruning. Positive score = good for P2 (AI)."""
     w = get_game_status(board, 2 if player == 1 else 1)
     if w == 2:
-        return 1000 - (3 - depth)
+        return 1000.0
     if w == 1:
-        return -1000 + (3 - depth)
+        return -1000.0
     if depth <= 0:
         return _evaluate(board)
     cells = {P1_PIECE, P1_KING} if player == 1 else {P2_PIECE, P2_KING}
@@ -154,6 +178,7 @@ def _minimax_ab(
                     moves.append(((r, c), dest, cap))
     if not moves:
         return _evaluate(board)
+    moves = _order_moves_for_search(board, moves)
     next_p = 2 if player == 1 else 1
     if is_max:
         best = float("-inf")
@@ -177,16 +202,28 @@ def _minimax_ab(
 
 
 def _evaluate(board: list[list[int]]) -> float:
-    """Heuristic: piece count diff (positive = good for P2). Kings worth more."""
-    score = 0
-    for row in board:
-        for c in row:
-            if c == P1_PIECE:
-                score -= 1
-            elif c == P1_KING:
-                score -= 2
-            elif c == P2_PIECE:
-                score += 1
-            elif c == P2_KING:
-                score += 2
+    """
+    Heuristic: material + advancement for men + centralization for kings.
+    Positive score = good for P2 (AI).
+    """
+    score = 0.0
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            cell = board[r][c]
+            if cell == EMPTY:
+                continue
+            center = abs(r - 4.5) + abs(c - 4.5)
+            king_center = (10.0 - center) * 0.035
+            if cell == P1_PIECE:
+                score -= 1.0
+                score -= 0.14 * (9 - r) / 9.0
+            elif cell == P1_KING:
+                score -= 2.2
+                score -= king_center
+            elif cell == P2_PIECE:
+                score += 1.0
+                score += 0.14 * r / 9.0
+            elif cell == P2_KING:
+                score += 2.2
+                score += king_center
     return score
