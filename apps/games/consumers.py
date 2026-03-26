@@ -188,7 +188,13 @@ class GameConsumer(AsyncWebsocketConsumer):
                 text_data=json.dumps({"type": "error", "detail": "Access denied"}),
             )
             return
-        msg = await self.save_chat_and_format(user, sender_label, body)
+        raw_nonce = data.get("client_nonce")
+        client_nonce = None
+        if isinstance(raw_nonce, str) and raw_nonce.strip():
+            client_nonce = raw_nonce.strip()[:128]
+        msg = await self.save_chat_and_format(
+            user, sender_label, body, client_nonce=client_nonce
+        )
         await self.channel_layer.group_send(
             self.room_name,
             {"type": "broadcast", "message": msg},
@@ -346,7 +352,13 @@ class GameConsumer(AsyncWebsocketConsumer):
         return (sender_label or "Guest")[:64]
 
     @database_sync_to_async
-    def save_chat_and_format(self, user, sender_label: str, body: str):
+    def save_chat_and_format(
+        self,
+        user,
+        sender_label: str,
+        body: str,
+        client_nonce: str | None = None,
+    ):
         from .models import GameChatMessage
 
         display = self._resolve_chat_display_name(user, sender_label)
@@ -359,13 +371,16 @@ class GameConsumer(AsyncWebsocketConsumer):
             guest_name="" if u else sender_label[:64],
             body=body[:500],
         )
-        return {
+        out = {
             "type": "chat_message",
             "id": str(msg.id),
             "sender": display,
             "text": msg.body,
             "created_at": msg.created_at.isoformat(),
         }
+        if client_nonce:
+            out["client_nonce"] = client_nonce
+        return out
 
     @database_sync_to_async
     def get_recent_chat_messages(self, limit: int = 50):

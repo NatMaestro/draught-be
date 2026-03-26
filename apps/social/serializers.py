@@ -6,6 +6,10 @@ from .models import FriendRequest, Notification
 
 
 class NotificationSerializer(serializers.ModelSerializer):
+    """Adds `game_status` for challenge_accepted rows so the client can hide Join when the match ended."""
+
+    game_status = serializers.SerializerMethodField()
+
     class Meta:
         model = Notification
         fields = [
@@ -15,9 +19,22 @@ class NotificationSerializer(serializers.ModelSerializer):
             "body",
             "read_at",
             "payload",
+            "game_status",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_game_status(self, obj):
+        if obj.kind != Notification.Kind.CHALLENGE_ACCEPTED:
+            return None
+        payload = obj.payload or {}
+        gid = payload.get("game_id")
+        if not gid:
+            return None
+        from apps.games.models import Game
+
+        g = Game.objects.filter(id=gid).only("status").first()
+        return g.status if g else None
 
 
 class FriendRequestSerializer(serializers.ModelSerializer):
