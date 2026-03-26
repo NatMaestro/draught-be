@@ -81,6 +81,8 @@ class GameConsumer(AsyncWebsocketConsumer):
             await self.handle_resign(data)
         elif msg_type == "chat":
             await self.handle_chat(data)
+        elif msg_type == "chat_typing":
+            await self.handle_chat_typing(data)
         else:
             await self.send(
                 text_data=json.dumps({"type": "error", "detail": "Unknown message type"}),
@@ -190,6 +192,29 @@ class GameConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_send(
             self.room_name,
             {"type": "broadcast", "message": msg},
+        )
+
+    async def handle_chat_typing(self, data):
+        """Ephemeral typing indicator — not persisted."""
+        user = self.scope.get("user")
+        game = await self.get_game_orm()
+        if not game:
+            return
+        if not await database_sync_to_async(_can_user_access_game_ws)(user, game):
+            return
+        sender_label = (data.get("sender") or "Guest")[:64]
+        active = bool(data.get("active"))
+        display = self._resolve_chat_display_name(user, sender_label)
+        await self.channel_layer.group_send(
+            self.room_name,
+            {
+                "type": "broadcast",
+                "message": {
+                    "type": "chat_typing",
+                    "sender": display,
+                    "active": active,
+                },
+            },
         )
 
     async def broadcast(self, event):
@@ -314,15 +339,20 @@ class GameConsumer(AsyncWebsocketConsumer):
         game.save()
         return {"winner_id": winner_id, "winner": winner_player}
 
+    def _resolve_chat_display_name(self, user, sender_label: str) -> str:
+        """Match chat_message sender labels (authenticated username vs guest name)."""
+        if user and user.is_authenticated:
+            return (user.get_username() or str(user.id))[:64]
+        return (sender_label or "Guest")[:64]
+
     @database_sync_to_async
     def save_chat_and_format(self, user, sender_label: str, body: str):
         from .models import GameChatMessage
 
-        display = sender_label
+        display = self._resolve_chat_display_name(user, sender_label)
         u = None
         if user and user.is_authenticated:
             u = user
-            display = user.get_username() or str(user.id)
         msg = GameChatMessage.objects.create(
             game_id=self.game_id,
             user=u,

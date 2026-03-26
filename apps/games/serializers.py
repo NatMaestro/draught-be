@@ -87,6 +87,7 @@ class GameListSerializer(serializers.ModelSerializer):
 class GameChallengeSerializer(serializers.ModelSerializer):
     from_user = PlayerPublicSerializer(read_only=True)
     to_user = PlayerPublicSerializer(read_only=True)
+    game_id = serializers.SerializerMethodField()
 
     class Meta:
         model = GameChallenge
@@ -97,8 +98,14 @@ class GameChallengeSerializer(serializers.ModelSerializer):
             "rematch_game",
             "status",
             "created_at",
+            "game_id",
         ]
         read_only_fields = fields
+
+    def get_game_id(self, obj):
+        if obj.result_game_id:
+            return str(obj.result_game_id)
+        return None
 
 
 class GameChallengeCreateSerializer(serializers.Serializer):

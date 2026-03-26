@@ -330,18 +330,24 @@ class ChallengeIncomingListView(generics.ListAPIView):
 
 
 class ChallengeOutgoingListView(generics.ListAPIView):
-    """GET /api/games/challenges/outgoing/ — challenges you sent that are still pending."""
+    """GET /api/games/challenges/outgoing/ — pending invites plus accepted games still active."""
 
     serializer_class = GameChallengeSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        user = self.request.user
         return (
-            GameChallenge.objects.filter(
-                from_user=self.request.user,
-                status=GameChallenge.Status.PENDING,
+            GameChallenge.objects.filter(from_user=user)
+            .filter(
+                Q(status=GameChallenge.Status.PENDING)
+                | Q(
+                    status=GameChallenge.Status.ACCEPTED,
+                    result_game__status=Game.Status.ACTIVE,
+                )
             )
-            .select_related("from_user", "to_user")
+            .select_related("from_user", "to_user", "result_game")
+            .order_by("-created_at")[:50]
         )
 
 
@@ -410,7 +416,8 @@ class ChallengeAcceptView(APIView):
             use_clock=use_clock,
         )
         ch.status = GameChallenge.Status.ACCEPTED
-        ch.save(update_fields=["status"])
+        ch.result_game = game
+        ch.save(update_fields=["status", "result_game"])
         notify_game_challenge_accepted(ch, game)
         return Response(
             {"game_id": str(game.id), "game": GameSerializer(game).data},

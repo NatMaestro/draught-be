@@ -106,6 +106,14 @@ class GameChallenge(models.Model):
         blank=True,
         related_name="rematch_challenges",
     )
+    # Game created when the invitee accepts; lets the challenger open the match from the API.
+    result_game = models.ForeignKey(
+        "Game",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="challenge_created_from",
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
