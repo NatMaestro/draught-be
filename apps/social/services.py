@@ -113,6 +113,15 @@ def notify_game_challenge_created(ch) -> None:
         body=body,
         payload={"challenge_id": str(ch.id), "from_user_id": sender.id},
     )
+    broadcast_social_user(
+        ch.to_user_id,
+        {
+            "type": "social",
+            "action": "game_challenge_received",
+            "challenge_id": str(ch.id),
+            "from_user_id": ch.from_user_id,
+        },
+    )
 
 
 def notify_game_challenge_accepted(ch, game) -> None:
@@ -133,6 +142,17 @@ def notify_game_challenge_accepted(ch, game) -> None:
             "to_user_id": accepter.id,
         },
     )
+    # Challenger must join the same game in real time (acceptor already navigates via API).
+    broadcast_social_user(
+        ch.from_user_id,
+        {
+            "type": "social",
+            "action": "challenge_accepted",
+            "challenge_id": str(ch.id),
+            "game_id": str(game.id),
+            "accepted_by_user_id": ch.to_user_id,
+        },
+    )
 
 
 def notify_game_challenge_declined(ch) -> None:
@@ -148,6 +168,15 @@ def notify_game_challenge_declined(ch) -> None:
         title=title,
         body=body,
         payload={"challenge_id": str(ch.id), "to_user_id": decliner.id},
+    )
+    broadcast_social_user(
+        ch.from_user_id,
+        {
+            "type": "social",
+            "action": "challenge_declined",
+            "challenge_id": str(ch.id),
+            "declined_by_user_id": ch.to_user_id,
+        },
     )
 
 
