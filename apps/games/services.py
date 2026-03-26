@@ -21,6 +21,7 @@ from .clock_utils import (
     clock_payload,
     freeze_clock_on_game_over,
     init_clock_for_active_game,
+    reset_per_turn_clock_for_player_to_move,
     stamp_turn_started_now,
 )
 from .models import Game, Move
@@ -134,7 +135,7 @@ def undo_last_move(game: Game):
             game.status = Game.Status.ACTIVE
             game.finished_at = None
             game.winner = None
-            stamp_turn_started_now(game)
+            init_clock_for_active_game(game)
         game.save()
 
     payload = {
@@ -284,6 +285,7 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
                 if game.is_ranked:
                     update_ratings(game)
         else:
+            reset_per_turn_clock_for_player_to_move(game)
             stamp_turn_started_now(game)
         game.save()
         cr, cc = (captured[0] if captured else (None, None))

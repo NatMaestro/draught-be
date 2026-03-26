@@ -53,6 +53,20 @@ def stamp_turn_started_now(game: Game) -> None:
     game.turn_started_at = timezone.now()
 
 
+def reset_per_turn_clock_for_player_to_move(game: Game) -> None:
+    """
+    Per-turn clock: each turn, the player to move gets a full `time_control_sec` bank.
+    Call after switching `current_turn` (and before `stamp_turn_started_now`).
+    """
+    if not getattr(game, "use_clock", True):
+        return
+    tc = float(_tc(game))
+    if game.current_turn == 1:
+        game.p1_time_remaining_sec = tc
+    else:
+        game.p2_time_remaining_sec = tc
+
+
 def freeze_clock_on_game_over(game: Game) -> None:
     """Stop the clock when the game ends."""
     game.turn_started_at = None
@@ -77,8 +91,8 @@ def active_player_remaining_seconds(game: Game) -> float | None:
 
 def clock_payload(game: Game) -> dict:
     """
-    Snapshot for API / WebSocket. Remaining values are at the *start* of the current turn;
-    clients add elapsed time since turn_started_at for the active player only.
+    Snapshot for API / WebSocket. Per-turn mode: the active player's bank counts down;
+    `time_control_sec` is the full allowance each turn.
     """
     now = timezone.now()
     ts = game.turn_started_at

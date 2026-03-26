@@ -54,14 +54,14 @@ class Game(models.Model):
     ai_difficulty = models.CharField(max_length=32, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
-    # Fischer-style clock (server source of truth for online sync).
+    # Per-turn clock (server source of truth for online sync); bank resets after each move.
     use_clock = models.BooleanField(
         default=True,
         help_text="When False, no time limits and no clock deductions.",
     )
     time_control_sec = models.PositiveIntegerField(
         default=600,
-        help_text="Initial bank per player in seconds (e.g. 600 = 10 minutes).",
+        help_text="Seconds each player has per turn (e.g. 600 = 10 minutes); resets when turns change.",
     )
     p1_time_remaining_sec = models.FloatField(default=600.0)
     p2_time_remaining_sec = models.FloatField(default=600.0)
