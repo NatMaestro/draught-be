@@ -123,17 +123,26 @@ class BoardEngineTests(TestCase):
         self.assertEqual(new_b[5][5], EMPTY)
         self.assertEqual(new_b[1][1], P1_KING)
 
-    def test_multi_capture_mid_promotion_then_king_flying(self):
-        """
-        Man crowns on row 0 and continues as a flying king; final square is not row 0.
-        apply_move must replay hops — a single teleport would leave a man on the last square.
-        """
+    def test_crown_only_when_final_square_is_promotion_row_capture_chain(self):
+        """Multi-jump ending on row 0 promotes; intermediate hops on row 0 do not crown early."""
         board = [[EMPTY for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
-        board[2][8] = P1_PIECE
-        board[1][7] = P2_PIECE
-        board[3][3] = P2_PIECE
-        ok = validate_and_get_move(board, 1, (2, 8), (4, 2))
+        board[4][0] = P1_PIECE
+        board[3][1] = P2_PIECE
+        board[1][1] = P2_PIECE
+        ok = validate_and_get_move(board, 1, (4, 0), (0, 0))
         self.assertIsNotNone(ok)
         new_b, caps = ok
         self.assertEqual(len(caps), 2)
-        self.assertEqual(new_b[4][2], P1_KING)
+        self.assertEqual(new_b[0][0], P1_KING)
+
+    def test_no_crown_when_chain_passes_king_row_but_final_square_is_not(self):
+        """Landing on row 0 mid-sequence does not crown if the full move ends elsewhere."""
+        board = [[EMPTY for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        board[2][0] = P1_PIECE
+        board[1][1] = P2_PIECE
+        board[1][3] = P2_PIECE
+        ok = validate_and_get_move(board, 1, (2, 0), (2, 4))
+        self.assertIsNotNone(ok)
+        new_b, caps = ok
+        self.assertEqual(len(caps), 2)
+        self.assertEqual(new_b[2][4], P1_PIECE)

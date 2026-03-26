@@ -17,6 +17,9 @@ including backward, when an opponent presents itself — same as typical interna
 Kings ("flying kings"): may slide any distance along diagonals through empty squares. They capture
 by jumping over an opponent on a diagonal and landing on any empty square beyond (forward, backward,
 or combined in a multi-jump sequence).
+
+Promotion: a man becomes a king only when the full move (including the entire capture chain) ends
+on the opponent's back rank — passing through that rank mid-sequence does not crown.
 """
 
 from typing import Optional
@@ -272,11 +275,8 @@ def _apply_capture(
     b[r0][c0] = EMPTY
     for (r, c) in captured:
         b[r][c] = EMPTY
-    # King promotion: P1 reaches row 0, P2 reaches row 9
-    if cell == P1_PIECE and r1 == 0:
-        b[r1][c1] = P1_KING
-    elif cell == P2_PIECE and r1 == BOARD_SIZE - 1:
-        b[r1][c1] = P2_KING
+    # No promotion here — multi-jump sequences may pass through the promotion row;
+    # crowning only when the full move ends on that row (see apply_move).
     return b
 
 
@@ -305,9 +305,9 @@ def _apply_capture_sequence(
     caps: list[tuple[int, int]],
 ) -> list[list[int]]:
     """
-    Replay a full capture chain hop-by-hop (men + flying kings). Required when a man
-    promotes mid-sequence and continues as a king — a single teleport from start to final
-    square would compute the wrong piece type.
+    Replay a full capture chain hop-by-hop (men + flying kings).
+    Intermediate landings on the promotion row do not crown — only the final square of
+    the move can promote (handled in apply_move after this returns).
     """
     if not caps:
         if pos != final_to:
@@ -349,7 +349,14 @@ def apply_move(
 
     cap_sq = [_normalize_sq(x) for x in captured]
     b0 = copy.deepcopy(board)
-    return _apply_capture_sequence(b0, fr, to, cap_sq)
+    b = _apply_capture_sequence(b0, fr, to, cap_sq)
+    r1, c1 = to
+    cell = b[r1][c1]
+    if cell == P1_PIECE and r1 == 0:
+        b[r1][c1] = P1_KING
+    elif cell == P2_PIECE and r1 == BOARD_SIZE - 1:
+        b[r1][c1] = P2_KING
+    return b
 
 
 def validate_and_get_move(

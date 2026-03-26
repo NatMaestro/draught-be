@@ -11,12 +11,16 @@ django_asgi_app = get_asgi_application()
 
 from apps.games import routing as games_routing
 from apps.games.middleware import JwtQueryAuthMiddleware
+from apps.social import routing as social_routing
 
 application = ProtocolTypeRouter(
     {
         "http": django_asgi_app,
         "websocket": JwtQueryAuthMiddleware(
-            URLRouter(games_routing.websocket_urlpatterns),
+            URLRouter(
+                games_routing.websocket_urlpatterns
+                + social_routing.websocket_urlpatterns
+            ),
         ),
     }
 )

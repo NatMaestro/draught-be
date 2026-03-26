@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "apps.board_engine",
     "apps.ratings",
     "apps.ai",
+    "apps.social",
 ]
 
 MIDDLEWARE = [
@@ -192,3 +193,20 @@ MATCHMAKING_RANKED_INITIAL_DELTA = env.int("MATCHMAKING_RANKED_INITIAL_DELTA", d
 MATCHMAKING_RANKED_MAX_DELTA = env.int("MATCHMAKING_RANKED_MAX_DELTA", default=500)
 MATCHMAKING_RANKED_EXPAND_EVERY_SEC = env.int("MATCHMAKING_RANKED_EXPAND_EVERY_SEC", default=15)
 MATCHMAKING_RANKED_EXPAND_STEP = env.int("MATCHMAKING_RANKED_EXPAND_STEP", default=25)
+
+# Web Push (VAPID) — optional; leave empty to disable push delivery (in-app notifications still work).
+# Generate keys: `pip install pywebpush` then use `pywebpush` docs or:
+#   openssl ecparam -name prime256v1 -genkey -noout -out vapid_private.pem
+#   and derive public key, or use an online VAPID generator for development.
+VAPID_PUBLIC_KEY = env("VAPID_PUBLIC_KEY", default="")
+VAPID_PRIVATE_KEY = env("VAPID_PRIVATE_KEY", default="")
+VAPID_SUBJECT = env("VAPID_SUBJECT", default="mailto:support@example.com")
+
+# Facebook Login — optional; used to validate tokens (debug_token) and link accounts.
+FACEBOOK_APP_ID = env("FACEBOOK_APP_ID", default="")
+FACEBOOK_APP_SECRET = env("FACEBOOK_APP_SECRET", default="")
+
+# TikTok Login Kit — optional; link account via OAuth code exchange.
+TIKTOK_CLIENT_KEY = env("TIKTOK_CLIENT_KEY", default="")
+TIKTOK_CLIENT_SECRET = env("TIKTOK_CLIENT_SECRET", default="")
+TIKTOK_REDIRECT_URI = env("TIKTOK_REDIRECT_URI", default="")

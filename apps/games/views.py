@@ -24,6 +24,11 @@ from .serializers import (
     MoveSerializer,
 )
 from apps.ai.services import get_ai_move
+from apps.social.services import (
+    notify_game_challenge_accepted,
+    notify_game_challenge_created,
+    notify_game_challenge_declined,
+)
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -324,6 +329,22 @@ class ChallengeIncomingListView(generics.ListAPIView):
         )
 
 
+class ChallengeOutgoingListView(generics.ListAPIView):
+    """GET /api/games/challenges/outgoing/ — challenges you sent that are still pending."""
+
+    serializer_class = GameChallengeSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            GameChallenge.objects.filter(
+                from_user=self.request.user,
+                status=GameChallenge.Status.PENDING,
+            )
+            .select_related("from_user", "to_user")
+        )
+
+
 class ChallengeCreateView(APIView):
     """POST /api/games/challenges/ — send a game request to another user."""
 
@@ -354,6 +375,7 @@ class ChallengeCreateView(APIView):
             to_user=to_user,
             rematch_game=rematch,
         )
+        notify_game_challenge_created(ch)
         return Response(GameChallengeSerializer(ch).data, status=status.HTTP_201_CREATED)
 
 
@@ -389,6 +411,7 @@ class ChallengeAcceptView(APIView):
         )
         ch.status = GameChallenge.Status.ACCEPTED
         ch.save(update_fields=["status"])
+        notify_game_challenge_accepted(ch, game)
         return Response(
             {"game_id": str(game.id), "game": GameSerializer(game).data},
             status=status.HTTP_200_OK,
@@ -409,5 +432,24 @@ class ChallengeDeclineView(APIView):
         if not ch:
             return Response({"detail": "Not found"}, status=404)
         ch.status = GameChallenge.Status.DECLINED
+        ch.save(update_fields=["status"])
+        notify_game_challenge_declined(ch)
+        return Response({"ok": True})
+
+
+class ChallengeCancelView(APIView):
+    """POST /api/games/challenges/<uuid>/cancel/ — withdraw a pending invite you sent."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, challenge_id):
+        ch = GameChallenge.objects.filter(
+            id=challenge_id,
+            from_user=request.user,
+            status=GameChallenge.Status.PENDING,
+        ).first()
+        if not ch:
+            return Response({"detail": "Not found"}, status=404)
+        ch.status = GameChallenge.Status.CANCELLED
         ch.save(update_fields=["status"])
         return Response({"ok": True})

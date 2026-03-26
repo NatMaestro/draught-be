@@ -14,7 +14,8 @@ draught-be/
 │   ├── board_engine/ # Core game logic (10x10, moves, captures, kings)
 │   ├── matchmaking/  # Redis queues (ranked/casual)
 │   ├── ratings/      # ELO calculation
-│   └── ai/           # Easy, Medium, Hard AI
+│   ├── ai/           # Easy, Medium, Hard AI
+│   └── social/       # Friends, in-app notifications, Web Push subscriptions
 ├── manage.py
 └── requirements.txt
 ```
@@ -99,6 +100,8 @@ python manage.py runserver
 
 Connect: `ws://host:8000/ws/game/{game_id}/`
 
+Social (JWT query param `?token=` same as game): `ws://host:8000/ws/social/` — pushes friend-request updates so clients can refresh lists without reload.
+
 Events:
 - `join_game` — request current game state
 - `make_move` — `{from_row, from_col, to_row, to_col}`
@@ -108,6 +111,11 @@ Server sends:
 - `game_state` — `{board, current_turn, status}`
 - `move_update` — `{board, current_turn, winner, captured}`
 - `game_over` — `{reason: "resign"}`
+
+## Facebook & TikTok (Play with friends)
+
+- **Facebook**: Set `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET` on the API, and `VITE_FACEBOOK_APP_ID` on the web app. Friend suggestions call Graph API `GET /me/friends` — Meta only returns friends who also use your Draught Facebook app (and who granted `user_friends` where applicable).
+- **TikTok**: Set `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, and `TIKTOK_REDIRECT_URI` (must match the redirect URI registered in the TikTok developer portal; production redirects should use **HTTPS** per TikTok). TikTok does not provide a third-party “friends list” API like Facebook; we only store the linked `open_id`. If the token exchange fails, confirm the OAuth endpoint and payload against TikTok’s current **Login Kit / user access token** documentation.
 
 ## Config
 
