@@ -146,7 +146,13 @@ if _cors_origins:
 else:
     CORS_ALLOW_ALL_ORIGINS = env.bool("CORS_ALLOW_ALL", default=True)
 
-CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+# Admin and any session-cookie POST from HTTPS must list the full origin(s) (scheme + host, no path).
+# Empty list + HTTPS → "Origin checking failed" on /admin/login/ etc.
+_csrf_trusted = env.list("CSRF_TRUSTED_ORIGINS", default=[])
+_render_public_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+if _render_public_url and _render_public_url not in _csrf_trusted:
+    _csrf_trusted = list(_csrf_trusted) + [_render_public_url]
+CSRF_TRUSTED_ORIGINS = _csrf_trusted
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
