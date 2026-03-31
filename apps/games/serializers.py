@@ -4,7 +4,7 @@ from rest_framework import serializers
 from apps.users.models import User
 
 from .models import Game, GameChallenge, Move
-from .services import can_undo_game, get_moves_payload_for_client
+from .services import can_undo_game, get_moves_payload_for_client, match_state_public
 
 
 class PlayerPublicSerializer(serializers.ModelSerializer):
@@ -18,6 +18,7 @@ class PlayerPublicSerializer(serializers.ModelSerializer):
 class GameSerializer(serializers.ModelSerializer):
     can_undo = serializers.SerializerMethodField()
     moves = serializers.SerializerMethodField()
+    match = serializers.SerializerMethodField()
     player_one = PlayerPublicSerializer(read_only=True)
     player_two = PlayerPublicSerializer(read_only=True)
     server_now = serializers.SerializerMethodField()
@@ -46,6 +47,7 @@ class GameSerializer(serializers.ModelSerializer):
             "server_now",
             "can_undo",
             "moves",
+            "match",
         ]
         read_only_fields = fields
 
@@ -58,6 +60,9 @@ class GameSerializer(serializers.ModelSerializer):
     def get_moves(self, obj: Game) -> list[dict]:
         """Ordered plies with captures for replay / move list."""
         return get_moves_payload_for_client(obj)
+
+    def get_match(self, obj: Game) -> dict | None:
+        return match_state_public(obj)
 
 
 class GameListSerializer(serializers.ModelSerializer):
@@ -96,6 +101,8 @@ class GameChallengeSerializer(serializers.ModelSerializer):
             "from_user",
             "to_user",
             "rematch_game",
+            "is_match",
+            "is_ranked",
             "status",
             "created_at",
             "game_id",
@@ -111,6 +118,8 @@ class GameChallengeSerializer(serializers.ModelSerializer):
 class GameChallengeCreateSerializer(serializers.Serializer):
     to_user_id = serializers.IntegerField(min_value=1)
     rematch_game_id = serializers.UUIDField(required=False, allow_null=True)
+    is_match = serializers.BooleanField(required=False, default=False)
+    is_ranked = serializers.BooleanField(required=False, default=False)
 
 
 class MoveSerializer(serializers.ModelSerializer):

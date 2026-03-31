@@ -9,8 +9,12 @@ from apps.users.models import User
 
 def update_ratings(game):
     """
-    Update ELO ratings for both players after ranked game.
-    Winner gets +K*(1-expected), loser gets +K*(0-expected).
+    Update ELO ratings for both players after a ranked contest.
+
+    For a single-board game, that is when the board ends. For a ranked *match*
+    (first-to-N mini-games), this runs once when the match is decided — same
+    K-factor and one increment to ``games_played`` / ``games_won`` as a normal
+    ranked game.
     """
     if not game.is_ranked or not game.winner:
         return

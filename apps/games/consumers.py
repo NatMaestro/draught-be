@@ -154,18 +154,31 @@ class GameConsumer(AsyncWebsocketConsumer):
                 text_data=json.dumps({"type": "error", "detail": res["error"]}),
             )
             return
+        if res.get("game_active"):
+            game = await self.get_game_orm()
+            if game:
+                payload = await database_sync_to_async(build_game_state_message)(game)
+                me = res.get("match_extras")
+                if me:
+                    payload.update(me)
+                await self.channel_layer.group_send(
+                    self.room_name,
+                    {"type": "broadcast", "message": payload},
+                )
+            return
+        msg = {
+            "type": "game_over",
+            "reason": "resign",
+            "winner": res.get("winner"),
+            "winner_id": res.get("winner_id"),
+            "status": "finished",
+        }
+        me = res.get("match_extras")
+        if me:
+            msg.update(me)
         await self.channel_layer.group_send(
             self.room_name,
-            {
-                "type": "broadcast",
-                "message": {
-                    "type": "game_over",
-                    "reason": "resign",
-                    "winner": res.get("winner"),
-                    "winner_id": res.get("winner_id"),
-                    "status": "finished",
-                },
-            },
+            {"type": "broadcast", "message": msg},
         )
 
     async def handle_chat(self, data):
@@ -245,18 +258,22 @@ class GameConsumer(AsyncWebsocketConsumer):
             player_num, err = _resolve_player_num(user, game)
             if err:
                 return {"ok": False, "error": err}
-            ok, new_board, captured, winner, captured_values = apply_move_service(
+            ok, new_board, captured, winner, captured_values, match_extras = apply_move_service(
                 game, player_num, fr, to
             )
             game.refresh_from_db()
             if not ok:
-                if winner is not None:
+                if winner is not None or match_extras is not None:
                     payload = self._move_payload(
                         game, new_board, captured, winner, captured_values
                     )
+                    if match_extras:
+                        payload.update(match_extras)
                     return {"ok": True, "payload": payload, "needs_ai": False}
                 return {"ok": False}
             payload = self._move_payload(game, new_board, captured, winner, captured_values)
+            if match_extras:
+                payload.update(match_extras)
             needs_ai = bool(
                 game.is_ai_game
                 and not winner
@@ -279,17 +296,24 @@ class GameConsumer(AsyncWebsocketConsumer):
                 or game.current_turn != 2
             ):
                 return None
-            move = get_ai_move(game.board_state, 2, game.ai_difficulty or "medium")
+            move = get_ai_move(
+                game.board_state,
+                2,
+                game.ai_difficulty or "medium",
+                game_id=game.id,
+            )
             if not move:
                 return None
             fr, to, _cap = move
-            ok, new_board, captured, winner, captured_values = apply_move_service(
+            ok, new_board, captured, winner, captured_values, match_extras = apply_move_service(
                 game, 2, fr, to
             )
             game.refresh_from_db()
             if not ok:
                 return None
             payload = self._move_payload(game, new_board, captured, winner, captured_values)
+            if match_extras:
+                payload.update(match_extras)
             return {"payload": payload}
 
     def _move_payload(self, game, new_board, captured, winner, captured_piece_values):
@@ -318,6 +342,7 @@ class GameConsumer(AsyncWebsocketConsumer):
     def resign_game_sync(self, user):
         from apps.ratings.services import update_ratings
         from .models import Game
+        from .services import continue_match_after_mini_game_end
 
         game = Game.objects.filter(id=self.game_id).first()
         if not game:
@@ -340,10 +365,22 @@ class GameConsumer(AsyncWebsocketConsumer):
             )
             winner_id = str(game.winner_id) if game.winner_id else None
             winner_player = 2 if user.id == game.player_one_id else 1
-            if game.is_ranked and game.winner:
+            if game.is_ranked and game.winner and not game.match_session_id:
                 update_ratings(game)
         game.save()
-        return {"winner_id": winner_id, "winner": winner_player}
+        match_extras = None
+        if game.match_session_id:
+            match_extras = continue_match_after_mini_game_end(
+                game,
+                winner_seat_override=winner_player,
+            )
+            game.refresh_from_db()
+        return {
+            "winner_id": winner_id,
+            "winner": winner_player,
+            "game_active": game.status == Game.Status.ACTIVE,
+            "match_extras": match_extras,
+        }
 
     def _resolve_chat_display_name(self, user, sender_label: str) -> str:
         """Match chat_message sender labels (authenticated username vs guest name)."""

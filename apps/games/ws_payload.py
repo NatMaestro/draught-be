@@ -4,6 +4,7 @@ from apps.board_engine.engine import get_game_status
 
 from .clock_utils import clock_payload
 from .models import Game
+from .services import match_state_public
 
 
 def build_game_state_message(game: Game, *, undo_applied: bool = False) -> dict:
@@ -18,7 +19,7 @@ def build_game_state_message(game: Game, *, undo_applied: bool = False) -> dict:
         if winner_num is None:
             winner_num = get_game_status(game.board_state, 1)
 
-    return {
+    msg = {
         "type": "game_state",
         "board": game.board_state,
         "current_turn": game.current_turn,
@@ -32,3 +33,7 @@ def build_game_state_message(game: Game, *, undo_applied: bool = False) -> dict:
         "undo_applied": undo_applied,
         **clock_payload(game),
     }
+    m = match_state_public(game)
+    if m:
+        msg["match"] = m
+    return msg

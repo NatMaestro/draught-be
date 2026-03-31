@@ -25,7 +25,9 @@ except ImportError:
 
 REDIS_URL = getattr(settings, "REDIS_URL", "redis://127.0.0.1:6379/0")
 QUEUE_RANKED = "matchmaking:ranked"
+QUEUE_RANKED_MATCH = "matchmaking:ranked_match"
 QUEUE_CASUAL = "matchmaking:casual"
+QUEUE_CASUAL_MATCH = "matchmaking:casual_match"
 # After a game is created, both players can read their assigned game id (esp. player who was waiting first).
 MATCH_READY_KEY = "matchmaking:ready:{user_id}"
 MATCH_READY_TTL_SEC = 180
@@ -88,7 +90,16 @@ def _parse_ranked_queue_item(raw: str) -> dict | None:
         t = float(o.get("t", time.time()))
         tc = int(o.get("tc", 600))
         uc = bool(o.get("uc", True))
-        return {"user_id": uid, "rating": r, "t": t, "tc": tc, "uc": uc, "_raw": raw}
+        mtw = int(o.get("mtw", 5))
+        return {
+            "user_id": uid,
+            "rating": r,
+            "t": t,
+            "tc": tc,
+            "uc": uc,
+            "mtw": max(1, min(9, mtw)),
+            "_raw": raw,
+        }
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
@@ -100,13 +111,17 @@ def _add_to_ranked_queue(
     *,
     time_control_sec: int = 600,
     use_clock: bool = True,
+    is_match: bool = False,
+    match_target_wins: int = 5,
 ) -> bool:
     """
     Try to pair with the earliest queued player within the current rating window.
+    Single-game and first-to-N ranked queues are separate (same as casual).
     Returns True if paired.
     """
+    queue_key = QUEUE_RANKED_MATCH if is_match else QUEUE_RANKED
     now = time.time()
-    items = r.lrange(QUEUE_RANKED, 0, -1)
+    items = r.lrange(queue_key, 0, -1)
     for raw in items:
         b = _parse_ranked_queue_item(raw)
         if not b:
@@ -114,33 +129,29 @@ def _add_to_ranked_queue(
         elapsed_b = now - b["t"]
         elapsed_a = 0.0  # joiner just arrived
         if _ranked_pair_allowed(rating, b["rating"], elapsed_a, elapsed_b):
-            r.lrem(QUEUE_RANKED, 1, raw)
-            r.lpush(
-                "matchmaking:pending",
-                json.dumps(
-                    {
-                        "player1": b["user_id"],
-                        "player2": user_id,
-                        "ranked": True,
-                        "time_control_sec": b.get("tc", 600),
-                        "use_clock": b.get("uc", True),
-                    },
-                ),
-            )
+            r.lrem(queue_key, 1, raw)
+            pending: dict = {
+                "player1": b["user_id"],
+                "player2": user_id,
+                "ranked": True,
+                "time_control_sec": b.get("tc", 600),
+                "use_clock": b.get("uc", True),
+            }
+            if is_match:
+                pending["is_match"] = True
+                pending["match_target_wins"] = int(b.get("mtw", 5))
+            r.lpush("matchmaking:pending", json.dumps(pending))
             return True
-    # No compatible opponent: join the tail
-    r.rpush(
-        QUEUE_RANKED,
-        json.dumps(
-            {
-                "user_id": user_id,
-                "rating": int(rating),
-                "t": now,
-                "tc": time_control_sec,
-                "uc": use_clock,
-            },
-        ),
-    )
+    payload = {
+        "user_id": user_id,
+        "rating": int(rating),
+        "t": now,
+        "tc": time_control_sec,
+        "uc": use_clock,
+    }
+    if is_match:
+        payload["mtw"] = max(1, min(9, int(match_target_wins or 5)))
+    r.rpush(queue_key, json.dumps(payload))
     return False
 
 
@@ -150,36 +161,48 @@ def _add_to_casual_queue(
     *,
     time_control_sec: int = 600,
     use_clock: bool = True,
+    is_match: bool = False,
+    match_target_wins: int = 5,
 ) -> bool:
-    """FIFO casual queue; first player's clock settings apply to the created game."""
-    data = json.dumps(
-        {"user_id": user_id, "tc": time_control_sec, "uc": use_clock},
-    )
-    opponent_raw = r.lpop(QUEUE_CASUAL)
+    """
+    FIFO casual queue (single-game or first-to-N match). First joiner's clock and
+    match target apply to the created game.
+    """
+    queue_key = QUEUE_CASUAL_MATCH if is_match else QUEUE_CASUAL
+    if is_match:
+        payload = {
+            "user_id": user_id,
+            "tc": time_control_sec,
+            "uc": use_clock,
+            "mtw": max(1, min(9, int(match_target_wins or 5))),
+        }
+    else:
+        payload = {"user_id": user_id, "tc": time_control_sec, "uc": use_clock}
+    data = json.dumps(payload)
+    opponent_raw = r.lpop(queue_key)
     if opponent_raw:
         try:
             opp = json.loads(opponent_raw)
             opp_id = int(opp.get("user_id", opp))
             tc = int(opp.get("tc", 600))
             uc = bool(opp.get("uc", True))
+            pending: dict = {
+                "player1": opp_id,
+                "player2": user_id,
+                "ranked": False,
+                "time_control_sec": tc,
+                "use_clock": uc,
+            }
+            if is_match:
+                pending["is_match"] = True
+                pending["match_target_wins"] = int(opp.get("mtw", 5))
         except (json.JSONDecodeError, TypeError, ValueError):
-            r.lpush(QUEUE_CASUAL, opponent_raw)
-            r.rpush(QUEUE_CASUAL, data)
+            r.lpush(queue_key, opponent_raw)
+            r.rpush(queue_key, data)
             return False
-        r.lpush(
-            "matchmaking:pending",
-            json.dumps(
-                {
-                    "player1": opp_id,
-                    "player2": user_id,
-                    "ranked": False,
-                    "time_control_sec": tc,
-                    "use_clock": uc,
-                },
-            ),
-        )
+        r.lpush("matchmaking:pending", json.dumps(pending))
         return True
-    r.rpush(QUEUE_CASUAL, data)
+    r.rpush(queue_key, data)
     return False
 
 
@@ -190,6 +213,8 @@ def add_to_queue(
     *,
     time_control_sec: int = 600,
     use_clock: bool = True,
+    is_match: bool = False,
+    match_target_wins: int = 5,
 ) -> bool:
     """
     Add user to matchmaking queue. Returns True if paired, False if queued.
@@ -209,12 +234,16 @@ def add_to_queue(
             r_val,
             time_control_sec=time_control_sec,
             use_clock=use_clock,
+            is_match=is_match,
+            match_target_wins=match_target_wins,
         )
     return _add_to_casual_queue(
         r,
         user_id,
         time_control_sec=time_control_sec,
         use_clock=use_clock,
+        is_match=is_match,
+        match_target_wins=match_target_wins,
     )
 
 
@@ -223,7 +252,16 @@ def remove_from_queue(user_id: int, ranked: bool) -> bool:
     r = _get_redis()
     if not r:
         return False
-    queue = QUEUE_RANKED if ranked else QUEUE_CASUAL
+    if ranked:
+        if _remove_user_from_list(r, QUEUE_RANKED, user_id):
+            return True
+        return _remove_user_from_list(r, QUEUE_RANKED_MATCH, user_id)
+    if _remove_user_from_list(r, QUEUE_CASUAL, user_id):
+        return True
+    return _remove_user_from_list(r, QUEUE_CASUAL_MATCH, user_id)
+
+
+def _remove_user_from_list(r, queue: str, user_id: int) -> bool:
     items = r.lrange(queue, 0, -1)
     for item in items:
         try:

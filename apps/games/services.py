@@ -24,7 +24,7 @@ from .clock_utils import (
     reset_per_turn_clock_for_player_to_move,
     stamp_turn_started_now,
 )
-from .models import Game, Move
+from .models import Game, MatchSession, Move
 
 
 def can_undo_game(game: Game) -> bool:
@@ -129,7 +129,7 @@ def undo_last_move(game: Game):
             freeze_clock_on_game_over(game)
             if not game.is_ai_game and game.player_one and game.player_two:
                 game.winner = game.player_one if winner == 1 else game.player_two
-                if game.is_ranked:
+                if game.is_ranked and not game.match_session_id:
                     update_ratings(game)
         else:
             game.status = Game.Status.ACTIVE
@@ -151,6 +151,162 @@ def undo_last_move(game: Game):
     return True, None, payload
 
 
+def winner_seat_from_finished_mini_game(game: Game) -> int | None:
+    """Seat (1 or 2) that won the just-finished mini-game."""
+    if game.status != Game.Status.FINISHED:
+        return None
+    if game.winner_id and game.player_one_id and game.winner_id == game.player_one_id:
+        return 1
+    if game.winner_id and game.player_two_id and game.winner_id == game.player_two_id:
+        return 2
+    w = get_game_status(game.board_state, game.current_turn)
+    if w in (1, 2):
+        return w
+    return None
+
+
+def match_state_public(game: Game) -> dict | None:
+    """Stable match snapshot for REST / game_state (no duplicate of win flags)."""
+    if not game.match_session_id:
+        return None
+    ms = game.match_session
+    return {
+        "p1_wins": ms.p1_wins,
+        "p2_wins": ms.p2_wins,
+        "target_wins": ms.target_wins,
+        "status": ms.status,
+        "is_raw": ms.is_raw,
+        "winner_id": ms.match_winner_id,
+    }
+
+
+def match_ws_extras_for_session(
+    game: Game,
+    ms: MatchSession,
+    *,
+    match_finished: bool,
+    mini_game_ended: bool,
+) -> dict:
+    out = {
+        "match_mode": True,
+        "match_p1_wins": ms.p1_wins,
+        "match_p2_wins": ms.p2_wins,
+        "match_target_wins": ms.target_wins,
+        "match_status": ms.status,
+        "match_finished": match_finished,
+        "match_is_raw": bool(match_finished and ms.is_raw),
+        "mini_game_ended": bool(mini_game_ended or match_finished),
+    }
+    if match_finished and ms.match_winner_id:
+        if game.player_one_id and ms.match_winner_id == game.player_one_id:
+            out["match_winner_seat"] = 1
+        elif game.player_two_id and ms.match_winner_id == game.player_two_id:
+            out["match_winner_seat"] = 2
+    return out
+
+
+def continue_match_after_mini_game_end(
+    game: Game,
+    *,
+    winner_seat_override: int | None = None,
+) -> dict | None:
+    """
+    After a mini-game ends (`game` is FINISHED with a decided winner). Updates match
+    scores; either completes the match or resets `game` for the next mini-game.
+    `winner_seat_override`: use for resign / guest when `game.winner` is unset.
+    """
+    if not game.match_session_id:
+        return None
+    ms = game.match_session
+    if ms.status != MatchSession.Status.ACTIVE:
+        return None
+    ws = (
+        winner_seat_override
+        if winner_seat_override in (1, 2)
+        else winner_seat_from_finished_mini_game(game)
+    )
+    if ws not in (1, 2):
+        return None
+    if ws == 1:
+        ms.p1_wins += 1
+    else:
+        ms.p2_wins += 1
+    target = int(ms.target_wins or 5)
+    done = ms.p1_wins >= target or ms.p2_wins >= target
+    if done:
+        ms.status = MatchSession.Status.FINISHED
+        ms.match_winner = game.winner
+        if not ms.match_winner_id:
+            if ws == 1 and game.player_one_id:
+                ms.match_winner = game.player_one
+            elif ws == 2 and game.player_two_id:
+                ms.match_winner = game.player_two
+        ms.is_raw = (
+            min(ms.p1_wins, ms.p2_wins) == 0 and max(ms.p1_wins, ms.p2_wins) >= target
+        )
+        ms.save(
+            update_fields=[
+                "p1_wins",
+                "p2_wins",
+                "status",
+                "match_winner_id",
+                "is_raw",
+            ],
+        )
+        # One Elo update for the full match (same K / games_played as one ranked game).
+        if game.is_ranked and game.player_one and game.player_two:
+            w = ms.match_winner or game.winner
+            if w:
+                game.winner = w
+                update_ratings(game)
+        return match_ws_extras_for_session(
+            game,
+            ms,
+            match_finished=True,
+            mini_game_ended=True,
+        )
+    ms.save(update_fields=["p1_wins", "p2_wins"])
+    Move.objects.filter(game=game).delete()
+    game.board_state = create_initial_board()
+    game.current_turn = 1
+    game.status = Game.Status.ACTIVE
+    game.winner = None
+    game.finished_at = None
+    init_clock_for_active_game(game)
+    game.save()
+    return match_ws_extras_for_session(
+        game,
+        ms,
+        match_finished=False,
+        mini_game_ended=True,
+    )
+
+
+def resolve_clock_timeout_pair(game: Game) -> tuple[int | None, dict | None]:
+    """
+    If the active player's time has run out, end the mini-game and maybe advance the match.
+    Returns (winner_seat, match_extra). winner_seat is set only if the board game is still
+    FINISHED after handling (single-game or match just completed).
+    """
+    if game.status != Game.Status.ACTIVE:
+        return None, None
+    if not getattr(game, "use_clock", True):
+        return None, None
+    remaining = active_player_remaining_seconds(game)
+    if remaining is None or remaining > 0:
+        return None, None
+    loser_seat = game.current_turn
+    winner_seat = 2 if loser_seat == 1 else 1
+    extras: dict | None = None
+    with transaction.atomic():
+        apply_clock_before_move(game, loser_seat)
+        finish_game_on_timeout(game, loser_seat)
+        if game.match_session_id:
+            extras = continue_match_after_mini_game_end(game)
+        game.refresh_from_db()
+    return (winner_seat if game.status == Game.Status.FINISHED else None, extras)
+
+
 def finish_game_on_timeout(game: Game, loser_seat: int) -> int:
     """
     Persist game over by flag: opponent of loser_seat wins.
@@ -162,7 +318,7 @@ def finish_game_on_timeout(game: Game, loser_seat: int) -> int:
     freeze_clock_on_game_over(game)
     if not game.is_ai_game and game.player_one and game.player_two:
         game.winner = game.player_one if winner_seat == 1 else game.player_two
-        if game.is_ranked:
+        if game.is_ranked and not game.match_session_id:
             update_ratings(game)
     elif game.is_ai_game and game.player_one:
         if winner_seat == 1:
@@ -173,22 +329,14 @@ def finish_game_on_timeout(game: Game, loser_seat: int) -> int:
 
 def resolve_clock_timeout_if_needed(game: Game) -> int | None:
     """
-    If the active player's time has run out, end the game (opponent wins).
-    Returns winner seat (1 or 2) if the game was ended, else None.
+    If the active player's time has run out, end the mini-game (and maybe advance the match).
+    Returns winner seat if the `Game` row is still finished afterward, else None.
     """
-    if game.status != Game.Status.ACTIVE:
-        return None
-    if not getattr(game, "use_clock", True):
-        return None
-    remaining = active_player_remaining_seconds(game)
-    if remaining is None or remaining > 0:
-        return None
-
-    loser_seat = game.current_turn
-    with transaction.atomic():
-        apply_clock_before_move(game, loser_seat)
-        finish_game_on_timeout(game, loser_seat)
-    return 2 if loser_seat == 1 else 1
+    ws, _ = resolve_clock_timeout_pair(game)
+    game.refresh_from_db()
+    if game.status == Game.Status.FINISHED:
+        return ws
+    return None
 
 
 def create_game(
@@ -200,6 +348,8 @@ def create_game(
     is_local_2p=False,
     time_control_sec: int = 600,
     use_clock: bool = True,
+    is_match: bool = False,
+    match_target_wins: int = 5,
 ):
     """Create new game with initial board."""
     board = create_initial_board()
@@ -209,6 +359,10 @@ def create_game(
         tc = max(60, min(7200, int(time_control_sec or 600)))
     else:
         tc = 0
+    ms = None
+    if is_match:
+        tw = max(1, min(9, int(match_target_wins or 5)))
+        ms = MatchSession.objects.create(target_wins=tw)
     game = Game.objects.create(
         player_one=player_one,
         player_two=player_two,
@@ -224,6 +378,7 @@ def create_game(
         p1_time_remaining_sec=float(tc) if use_clock else 0.0,
         p2_time_remaining_sec=float(tc) if use_clock else 0.0,
         turn_started_at=None,
+        match_session=ms,
     )
     if is_playable:
         init_clock_for_active_game(game)
@@ -240,26 +395,29 @@ def create_game(
 def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: tuple[int, int]):
     """
     Apply move if valid. Returns
-    (success, new_board_state, captured_list, winner, captured_piece_values).
+    (success, new_board_state, captured_list, winner, captured_piece_values, match_extras).
 
-    On loss by timeout, success is False and winner is the winning seat (1 or 2);
-    new_board_state is None and captured empty.
+    On loss by timeout, success is False; winner is the winning seat if the board game
+    stays finished, else None when the match continues with a fresh mini-game.
+    match_extras is a dict for WebSocket/API when match state changes, else None.
     """
     if game.status != Game.Status.ACTIVE:
-        return (False, None, [], None, [])
+        return (False, None, [], None, [], None)
     if game.current_turn != player_num:
-        return (False, None, [], None, [])
+        return (False, None, [], None, [], None)
 
     if getattr(game, "use_clock", True):
-        wt = resolve_clock_timeout_if_needed(game)
+        wt, clk_extras = resolve_clock_timeout_pair(game)
+        game.refresh_from_db()
         if wt is not None:
-            game.refresh_from_db()
-            return (False, game.board_state, [], wt, [])
+            return (False, game.board_state, [], wt, [], clk_extras)
+        if clk_extras is not None:
+            return (False, game.board_state, [], None, [], clk_extras)
 
     board = game.board_state
     result = validate_and_get_move(board, player_num, from_pos, to_pos)
     if result is None:
-        return (False, None, [], None, [])
+        return (False, None, [], None, [], None)
     new_board, captured = result
     # Cell values on the pre-move board (for client trophies without relying on snapshots).
     captured_piece_values = [board[r][c] for (r, c) in captured]
@@ -271,8 +429,15 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
                 game.p1_time_remaining_sec if player_num == 1 else game.p2_time_remaining_sec
             )
             if remaining <= 0:
-                ws = finish_game_on_timeout(game, player_num)
-                return (False, None, [], ws, [])
+                finish_game_on_timeout(game, player_num)
+                match_extras = None
+                if game.match_session_id:
+                    match_extras = continue_match_after_mini_game_end(game)
+                game.refresh_from_db()
+                ws = winner_seat_from_finished_mini_game(game) if (
+                    game.status == Game.Status.FINISHED
+                ) else None
+                return (False, game.board_state, [], ws, [], match_extras)
 
         game.board_state = new_board
         game.current_turn = 2 if player_num == 1 else 1
@@ -282,8 +447,11 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
             freeze_clock_on_game_over(game)
             if not game.is_ai_game and game.player_one and game.player_two:
                 game.winner = game.player_one if winner == 1 else game.player_two
-                if game.is_ranked:
+                if game.is_ranked and not game.match_session_id:
                     update_ratings(game)
+            elif game.is_ai_game and game.player_one:
+                if winner == 1:
+                    game.winner = game.player_one
         else:
             reset_per_turn_clock_for_player_to_move(game)
             stamp_turn_started_now(game)
@@ -299,7 +467,19 @@ def apply_move(game: Game, player_num: int, from_pos: tuple[int, int], to_pos: t
             captured_row=cr,
             captured_col=cc,
         )
-    return (True, new_board, captured, winner, captured_piece_values)
+        match_extras = None
+        if winner and game.match_session_id:
+            match_extras = continue_match_after_mini_game_end(game)
+            game.refresh_from_db()
+        out_winner = winner
+        if (
+            match_extras
+            and match_extras.get("mini_game_ended")
+            and not match_extras.get("match_finished")
+        ):
+            out_winner = None
+        out_board = game.board_state if match_extras else new_board
+        return (True, out_board, captured, out_winner, captured_piece_values, match_extras)
 
 
 def get_moves_for_piece(game: Game, row: int, col: int) -> list[dict]:

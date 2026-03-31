@@ -34,7 +34,14 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
 from .clock_utils import clock_payload, freeze_clock_on_game_over
-from .services import create_game, apply_move, get_moves_for_piece, undo_last_move, resolve_clock_timeout_if_needed
+from .services import (
+    continue_match_after_mini_game_end,
+    create_game,
+    apply_move,
+    get_moves_for_piece,
+    undo_last_move,
+    resolve_clock_timeout_if_needed,
+)
 from .ws_payload import build_game_state_message
 from .permissions import can_access_game, is_guest_game
 from apps.ratings.services import update_ratings
@@ -43,7 +50,12 @@ from apps.ratings.services import update_ratings
 class GameDetailView(generics.RetrieveAPIView):
     """GET /api/games/<id>/ - game state. Allowed for guest games or own games."""
 
-    queryset = Game.objects.prefetch_related("moves")
+    queryset = Game.objects.prefetch_related("moves").select_related(
+        "match_session",
+        "player_one",
+        "player_two",
+        "winner",
+    )
     serializer_class = GameSerializer
     permission_classes = [AllowAny]
     lookup_field = "id"
@@ -78,6 +90,17 @@ class GameCreateView(APIView):
             use_clock = raw_use_clock
         elif isinstance(raw_use_clock, str):
             use_clock = raw_use_clock.strip().lower() not in ("0", "false", "no", "")
+        raw_match = request.data.get("is_match", False)
+        is_match = bool(raw_match) if isinstance(raw_match, bool) else (
+            str(raw_match).strip().lower() in ("1", "true", "yes")
+        )
+        match_target_wins = 5
+        try:
+            raw_mw = request.data.get("match_target_wins")
+            if raw_mw is not None:
+                match_target_wins = int(raw_mw)
+        except (TypeError, ValueError):
+            match_target_wins = 5
         time_control_sec = 600
         try:
             if raw_tc is not None:
@@ -95,6 +118,8 @@ class GameCreateView(APIView):
             is_local_2p=is_local_2p,
             time_control_sec=time_control_sec,
             use_clock=use_clock,
+            is_match=is_match,
+            match_target_wins=match_target_wins,
         )
         return Response(GameSerializer(game).data, status=status.HTTP_201_CREATED)
 
@@ -118,30 +143,30 @@ class MoveView(APIView):
             player_num = game.current_turn
         else:
             player_num = 1 if request.user == game.player_one else 2
-        ok, new_board, captured, winner, captured_values = apply_move(
+        ok, new_board, captured, winner, captured_values, match_extras = apply_move(
             game, player_num, from_pos, to_pos
         )
         if not ok:
-            if winner is not None:
+            if winner is not None or match_extras is not None:
                 game.refresh_from_db()
-                return Response(
-                    {
-                        "detail": "timeout",
-                        "end_reason": "timeout",
-                        "board": game.board_state,
-                        "current_turn": game.current_turn,
-                        "winner": winner,
-                        "status": game.status,
-                        "captured": [],
-                        "captured_piece_values": [],
-                        "move_count": game.moves.count(),
-                        **clock_payload(game),
-                    },
-                    status=status.HTTP_200_OK,
-                )
+                body = {
+                    "detail": "timeout",
+                    "end_reason": "timeout",
+                    "board": game.board_state,
+                    "current_turn": game.current_turn,
+                    "winner": winner,
+                    "status": game.status,
+                    "captured": [],
+                    "captured_piece_values": [],
+                    "move_count": game.moves.count(),
+                    **clock_payload(game),
+                }
+                if match_extras:
+                    body.update(match_extras)
+                return Response(body, status=status.HTTP_200_OK)
             return Response({"detail": "Invalid move"}, status=400)
         game.refresh_from_db()
-        return Response({
+        body = {
             "board": new_board,
             "current_turn": game.current_turn,
             "winner": winner,
@@ -150,7 +175,10 @@ class MoveView(APIView):
             "captured_piece_values": captured_values,
             "move_count": game.moves.count(),
             **clock_payload(game),
-        })
+        }
+        if match_extras:
+            body.update(match_extras)
+        return Response(body)
 
 
 class LegalMovesView(APIView):
@@ -200,43 +228,49 @@ class AiMoveView(APIView):
             return Response({"detail": "Game not active"}, status=status.HTTP_400_BAD_REQUEST)
         if game.current_turn != 2:
             return Response({"detail": "Not AI's turn"}, status=status.HTTP_400_BAD_REQUEST)
-        move = get_ai_move(game.board_state, 2, game.ai_difficulty or "medium")
+        move = get_ai_move(
+            game.board_state,
+            2,
+            game.ai_difficulty or "medium",
+            game_id=game.id,
+        )
         if not move:
             return Response({"detail": "No moves"}, status=status.HTTP_400_BAD_REQUEST)
         fr, to, _cap = move
-        ok, new_board, captured, winner, captured_values = apply_move(game, 2, fr, to)
+        ok, new_board, captured, winner, captured_values, match_extras = apply_move(game, 2, fr, to)
         if not ok:
-            if winner is not None:
+            if winner is not None or match_extras is not None:
                 game.refresh_from_db()
-                return Response(
-                    {
-                        "detail": "timeout",
-                        "end_reason": "timeout",
-                        "board": game.board_state,
-                        "current_turn": game.current_turn,
-                        "winner": winner,
-                        "status": game.status,
-                        "captured": [],
-                        "captured_piece_values": [],
-                        "move_count": game.moves.count(),
-                        **clock_payload(game),
-                    },
-                    status=status.HTTP_200_OK,
-                )
+                body = {
+                    "detail": "timeout",
+                    "end_reason": "timeout",
+                    "board": game.board_state,
+                    "current_turn": game.current_turn,
+                    "winner": winner,
+                    "status": game.status,
+                    "captured": [],
+                    "captured_piece_values": [],
+                    "move_count": game.moves.count(),
+                    **clock_payload(game),
+                }
+                if match_extras:
+                    body.update(match_extras)
+                return Response(body, status=status.HTTP_200_OK)
             return Response({"detail": "Invalid AI move"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         game.refresh_from_db()
-        return Response(
-            {
-                "board": new_board,
-                "current_turn": game.current_turn,
-                "winner": winner,
-                "status": game.status,
-                "captured": [{"row": r, "col": c} for (r, c) in captured],
-                "captured_piece_values": captured_values,
-                "move_count": game.moves.count(),
-                **clock_payload(game),
-            }
-        )
+        body = {
+            "board": new_board,
+            "current_turn": game.current_turn,
+            "winner": winner,
+            "status": game.status,
+            "captured": [{"row": r, "col": c} for (r, c) in captured],
+            "captured_piece_values": captured_values,
+            "move_count": game.moves.count(),
+            **clock_payload(game),
+        }
+        if match_extras:
+            body.update(match_extras)
+        return Response(body)
 
 
 def _broadcast_game_state_ws(game):
@@ -288,11 +322,25 @@ class ResignView(APIView):
         freeze_clock_on_game_over(game)
         if not is_guest_game(game):
             game.winner = game.player_two if request.user == game.player_one else game.player_one
-            if game.is_ranked and game.winner:
+            if game.is_ranked and game.winner and not game.match_session_id:
                 update_ratings(game)
         game.save()
+        match_extras = None
+        if game.match_session_id:
+            if is_guest_game(game):
+                resign_winner_seat = 2 if game.current_turn == 1 else 1
+            else:
+                resign_winner_seat = 2 if request.user == game.player_one else 1
+            match_extras = continue_match_after_mini_game_end(
+                game,
+                winner_seat_override=resign_winner_seat,
+            )
+            game.refresh_from_db()
         winner_id = game.winner_id if game.winner_id else None
-        return Response({"status": "resigned", "winner": winner_id})
+        body = {"status": "resigned", "winner": winner_id}
+        if match_extras:
+            body.update(match_extras)
+        return Response(body)
 
 
 class GameHistoryView(generics.ListAPIView):
@@ -380,6 +428,10 @@ class ChallengeCreateView(APIView):
             from_user=request.user,
             to_user=to_user,
             rematch_game=rematch,
+            is_match=bool(ser.validated_data.get("is_match"))
+            or (bool(rematch and rematch.match_session_id)),
+            is_ranked=bool(ser.validated_data.get("is_ranked"))
+            or (bool(rematch and rematch.is_ranked)),
         )
         notify_game_challenge_created(ch)
         return Response(GameChallengeSerializer(ch).data, status=status.HTTP_201_CREATED)
@@ -411,9 +463,10 @@ class ChallengeAcceptView(APIView):
         game = create_game(
             player_one=ch.from_user,
             player_two=ch.to_user,
-            is_ranked=False,
+            is_ranked=ch.is_ranked,
             time_control_sec=tc,
             use_clock=use_clock,
+            is_match=ch.is_match,
         )
         ch.status = GameChallenge.Status.ACCEPTED
         ch.result_game = game

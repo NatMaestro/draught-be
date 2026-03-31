@@ -7,6 +7,49 @@ from django.db import models
 from django.conf import settings
 
 
+class MatchSession(models.Model):
+    """
+    First-to-N mini-games (default 5). One Game row is reset between mini-games; this holds match totals.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        FINISHED = "finished", "Finished"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    p1_wins = models.PositiveSmallIntegerField(default=0)
+    p2_wins = models.PositiveSmallIntegerField(default=0)
+    target_wins = models.PositiveSmallIntegerField(
+        default=5,
+        help_text="Mini-games needed to win the match (e.g. 5).",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    match_winner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="match_victories",
+    )
+    is_raw = models.BooleanField(
+        default=False,
+        help_text="True when the match ended with no mini-game wins for the loser (e.g. 5–0).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "games_matchsession"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Match {self.id} ({self.p1_wins}-{self.p2_wins})"
+
+
 class Game(models.Model):
     """Game session with board state."""
 
@@ -70,6 +113,14 @@ class Game(models.Model):
         blank=True,
         help_text="When the current turn began; active player's clock runs from here.",
     )
+    match_session = models.ForeignKey(
+        MatchSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="games",
+        help_text="When set, board wins feed this match until target_wins is reached.",
+    )
 
     class Meta:
         db_table = "games_game"
@@ -113,6 +164,14 @@ class GameChallenge(models.Model):
         null=True,
         blank=True,
         related_name="challenge_created_from",
+    )
+    is_match = models.BooleanField(
+        default=False,
+        help_text="First-to-five mini-games when the challenge is accepted.",
+    )
+    is_ranked = models.BooleanField(
+        default=False,
+        help_text="When True, the game from this invite uses Elo (per board or per match).",
     )
     status = models.CharField(
         max_length=20,

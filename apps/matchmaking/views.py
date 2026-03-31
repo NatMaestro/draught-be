@@ -49,12 +49,16 @@ class JoinMatchmakingView(APIView):
         )
         tc = ser.validated_data.get("time_control_sec", 600)
         uc = ser.validated_data.get("use_clock", True)
+        is_match = bool(ser.validated_data.get("is_match"))
+        match_target_wins = int(ser.validated_data.get("match_target_wins", 5))
         paired = add_to_queue(
             user.id,
             ranked,
             rating=rating_val,
             time_control_sec=tc,
             use_clock=uc,
+            is_match=is_match,
+            match_target_wins=match_target_wins,
         )
         if paired:
             match = get_pending_match(user.id)
@@ -63,12 +67,15 @@ class JoinMatchmakingView(APIView):
                 User = get_user_model()
                 p1 = User.objects.get(id=match["player1"])
                 p2 = User.objects.get(id=match["player2"])
+                is_mm = bool(match.get("is_match"))
                 game = create_game(
                     player_one=p1,
                     player_two=p2,
-                    is_ranked=match["ranked"],
+                    is_ranked=bool(match["ranked"]),
                     time_control_sec=match.get("time_control_sec", 600),
                     use_clock=match.get("use_clock", True),
+                    is_match=is_mm,
+                    match_target_wins=int(match.get("match_target_wins", 5)),
                 )
                 gid = str(game.id)
                 notify_match_ready(gid, p1.id, p2.id)

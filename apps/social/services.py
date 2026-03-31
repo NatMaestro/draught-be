@@ -105,7 +105,15 @@ def notify_game_challenge_created(ch) -> None:
     assert isinstance(ch, GameChallenge)
     sender = ch.from_user
     title = "Game invite"
-    body = f"{sender.username} challenged you to a game."
+    if ch.is_ranked and ch.is_match:
+        kind = "a ranked match"
+    elif ch.is_ranked:
+        kind = "a ranked game"
+    elif ch.is_match:
+        kind = "an unrated match"
+    else:
+        kind = "a casual game"
+    body = f"{sender.username} challenged you to {kind}."
     create_notification(
         recipient=ch.to_user,
         kind=Notification.Kind.GAME_CHALLENGE,
