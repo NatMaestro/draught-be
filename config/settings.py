@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "apps.ratings",
     "apps.ai",
     "apps.social",
+    "apps.cms",
 ]
 
 MIDDLEWARE = [

@@ -22,4 +22,5 @@ urlpatterns = [
     path("api/matchmaking/", include("apps.matchmaking.urls")),
     path("api/games/", include("apps.games.urls")),
     path("api/social/", include("apps.social.urls")),
+    path("api/cms/", include("apps.cms.urls")),
 ]
